@@ -141,18 +141,182 @@ class ComputationGraph:
             lines.append(f"  {op_type:25s}: {count}")
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------
+    # Stage (Prefill/Decode) helpers
+    # ------------------------------------------------------------------
+
+    def tag_unassigned_as(self, stage: str) -> None:
+        """Set stage for all nodes that still have ``"unknown"`` stage."""
+        for node in self._nodes.values():
+            if node.stage in ("unknown", ""):
+                node.stage = stage
+
+    # ------------------------------------------------------------------
+    # Stage (Prefill/Decode) analysis
+    # ------------------------------------------------------------------
+
+    def filter_by_stage(self, stage: str) -> ComputationGraph:
+        """Create a subgraph containing only nodes of the given stage.
+
+        Args:
+            stage: ``"prefill"``, ``"decode"``, or others.
+
+        Returns:
+            A new ``ComputationGraph`` with matching nodes.
+        """
+        sub = ComputationGraph(f"{self.model_name}[{stage}]")
+        sub.prompt_text = self.prompt_text
+        sub.prompt_tokens = self.prompt_tokens
+        for node in self._nodes.values():
+            if node.stage == stage:
+                sub.add_node(node)
+        return sub
+
     def to_stage_graphs(self) -> tuple[ComputationGraph, ComputationGraph]:
         """Split this graph into separate prefill and decode subgraphs."""
-        prefill = ComputationGraph(f"{self.model_name}[prefill]")
-        decode = ComputationGraph(f"{self.model_name}[decode]")
-
-        for node in self._nodes.values():
-            if node.stage == "prefill":
-                prefill.add_node(node)
-            elif node.stage == "decode":
-                decode.add_node(node)
-
+        prefill = self.filter_by_stage("prefill")
+        decode = self.filter_by_stage("decode")
         return prefill, decode
+
+    def get_stage_stats(self, stage: str) -> dict:
+        """Get aggregated statistics for a given inference stage.
+
+        Returns:
+            dict with keys: num_ops, total_flops, total_memory_bytes,
+            arith_intensity, op_counts, category_flops, category_memory.
+        """
+        ops = [n for n in self._nodes.values() if n.stage == stage]
+        if not ops:
+            return {"num_ops": 0, "total_flops": 0, "total_memory_bytes": 0,
+                    "arith_intensity": 0.0, "op_counts": {}, "category_flops": {}}
+
+        total_flops = sum(n.flops for n in ops)
+        total_memory = sum(n.memory_bytes for n in ops)
+
+        op_counts: dict[str, int] = defaultdict(int)
+        category_flops: dict[str, int] = defaultdict(int)
+        category_memory: dict[str, int] = defaultdict(int)
+        for n in ops:
+            op_counts[n.op_type] += 1
+            category_flops[n.category] += n.flops
+            category_memory[n.category] += n.memory_bytes
+
+        return {
+            "num_ops": len(ops),
+            "total_flops": total_flops,
+            "total_memory_bytes": total_memory,
+            "arith_intensity": total_flops / total_memory if total_memory > 0 else 0.0,
+            "op_counts": dict(op_counts),
+            "category_flops": dict(category_flops),
+            "category_memory": dict(category_memory),
+        }
+
+    def stage_comparison_text(self, hardware_profile: Optional[dict] = None) -> str:
+        """Return formatted comparison between prefill and decode stages.
+
+        Args:
+            hardware_profile: Optional dict with "peak_flops" and "memory_bw"
+                              (bytes/sec) for roofline analysis.
+
+        Returns:
+            Formatted comparison text.
+        """
+        prefill_stats = self.get_stage_stats("prefill")
+        decode_stats = self.get_stage_stats("decode")
+
+        lines = []
+        lines.append("=" * 66)
+        lines.append("  Phase Comparison: Prefill vs Decode")
+        lines.append("=" * 66)
+
+        # ---- Overall ----
+        lines.append(f"\n{'Metric':<30s} {'Prefill':>16s} {'Decode':>16s}")
+        lines.append("-" * 66)
+        pf_ops = prefill_stats["num_ops"]
+        dc_ops = decode_stats["num_ops"]
+        pf_flops = prefill_stats["total_flops"]
+        dc_flops = decode_stats["total_flops"]
+        pf_mem = prefill_stats["total_memory_bytes"]
+        dc_mem = decode_stats["total_memory_bytes"]
+        pf_ai = prefill_stats["arith_intensity"]
+        dc_ai = decode_stats["arith_intensity"]
+
+        lines.append(f"{'Operator nodes':<30s} {pf_ops:>16d} {dc_ops:>16d}")
+        lines.append(f"{'Total FLOPs':<30s} {pf_flops:>16,} {dc_flops:>16,}")
+        lines.append(f"{'Memory bytes':<30s} {pf_mem:>16,} {dc_mem:>16,}")
+        lines.append(f"{'Arith intensity (FLOPs/byte)':<30s} {pf_ai:>16.2f} {dc_ai:>16.2f}")
+
+        # Ratio
+        total_flops = pf_flops + dc_flops
+        if total_flops > 0:
+            lines.append(f"\n  FLOPs distribution:   Prefill {pf_flops/total_flops*100:.1f}%"
+                         f" / Decode {dc_flops/total_flops*100:.1f}%")
+
+        # ---- Category breakdown ----
+        lines.append(f"\n{'Category FLOPs':<30s} {'Prefill':>16s} {'Decode':>16s}")
+        lines.append("-" * 66)
+        all_cats = set(list(prefill_stats["category_flops"].keys()) +
+                       list(decode_stats["category_flops"].keys()))
+        for cat in sorted(all_cats):
+            pf_cat = prefill_stats["category_flops"].get(cat, 0)
+            dc_cat = decode_stats["category_flops"].get(cat, 0)
+            lines.append(f"{cat:<30s} {pf_cat:>16,} {dc_cat:>16,}")
+
+        # ---- Roofline analysis ----
+        if hardware_profile:
+            lines.append("")
+            lines.append("")
+            lines.append("=" * 66)
+            lines.append("  Roofline Analysis")
+            lines.append("=" * 66)
+            pf_bw = hardware_profile.get("memory_bw", 0)
+            pf_fp = hardware_profile.get("peak_flops", 0)
+            lines.append(f"  Hardware:             "
+                         f"Peak FP = {pf_fp/1e12:.1f} TFLOPS, "
+                         f"Memory BW = {pf_bw/1e9:.0f} GB/s")
+            ridge = pf_fp / pf_bw if pf_bw > 0 else 0
+            lines.append(f"  Ridge point:          "
+                         f"{ridge:.1f} FLOPs/byte")
+
+            for label, stats in [("Prefill", prefill_stats), ("Decode", decode_stats)]:
+                ai = stats["arith_intensity"]
+                ops_flops = stats["total_flops"]
+                ops_mem = stats["total_memory_bytes"]
+                if ai > 0 and pf_bw > 0:
+                    # Compute-bound or memory-bound?
+                    bound = "COMPUTE BOUND" if ai >= ridge else "MEMORY BOUND"
+                    perf = ai * pf_bw  # achievable performance
+                    util = perf / pf_fp * 100 if pf_fp > 0 else 0
+                    lines.append(f"\n  {label:<12s} AI={ai:<8.2f}  "
+                                 f"{bound:<20s}  "
+                                 f"Util={util:.1f}%")
+                    if ops_flops > 0 and ops_mem > 0:
+                        lines.append(f"             "
+                                     f"FLOPs={ops_flops/1e6:.0f}M  "
+                                     f"Mem={ops_mem/1e6:.0f}MB  "
+                                     f"Batch={self.prompt_tokens}")
+
+        return "\n".join(lines)
+
+    def save_phase_report(self, output_dir: str | Path, name: str = "",
+                          hardware_profile: Optional[dict] = None) -> Path:
+        """Save the phase comparison report to a text file.
+
+        Args:
+            output_dir: Output directory.
+            name: Optional filename stem. Defaults to ``"phase"``.
+            hardware_profile: Optional hardware spec dict for roofline analysis.
+
+        Returns:
+            Path to the saved report file.
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stem = name or "phase"
+        path = output_dir / f"{stem}_phase_report.txt"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.stage_comparison_text(hardware_profile=hardware_profile))
+        return path
 
     def save_to_json(self, output_dir: str | Path,
                      registry: OperatorRegistry | None = None,

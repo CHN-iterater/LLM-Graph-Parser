@@ -294,21 +294,20 @@ class OnnxParser:
             )
 
     def _resolve_op(self, onnx_op_type: str):
-        """Map an ONNX op type to our OperatorSpec via the registry.
+        """Map an ONNX op type to an OperatorSpec via the registry.
 
-        First checks the ``ONNX_OP_MAP`` for a direct mapping,
-        then falls back to registry lookup, then to UNKNOWN.
+        First checks ``ONNX_OP_MAP`` for a direct mapping,
+        then falls back to the registry's dynamic name resolution
+        (never returns UNKNOWN).
         """
         mapped = ONNX_OP_MAP.get(onnx_op_type)
-        if mapped:
+        # If the mapping leads to a real operator, use it
+        if mapped and mapped != "UNKNOWN":
             spec = self._registry.get(mapped)
             if spec:
                 return spec
-        # Fallback: try direct registry lookup
-        spec = self._registry.lookup(onnx_op_type)
-        if spec and spec.name != "UNKNOWN":
-            return spec
-        return self._registry.get("UNKNOWN")
+        # Fallback: dynamic name resolution from the target string
+        return self._registry.lookup(onnx_op_type)
 
 
 def _onnx_dtype_to_str(elem_type: int) -> str:

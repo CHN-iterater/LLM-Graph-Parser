@@ -52,11 +52,15 @@ def parse_model(model, *example_args, model_name: str = "model",
     Returns:
         ComputationGraph，包含算子 DAG。
     """
-    import os, tempfile
+    import os, tempfile, warnings
     import torch
     from .parser.onnx_parser import OnnxParser
     from .utils.flops_calculator import estimate_flops
     from .utils.memory_calculator import estimate_memory_bytes
+
+    # 抑制 ONNX 导出时的无关警告
+    warnings.filterwarnings("ignore", category=FutureWarning, module="copyreg")
+    warnings.filterwarnings("ignore", message=".*torchvision.*")
 
     if registry is None:
         registry = OperatorRegistry.get_default()
@@ -69,7 +73,8 @@ def parse_model(model, *example_args, model_name: str = "model",
         old_cache = model.config.use_cache
         model.config.use_cache = False
 
-    if not onnx_path:
+    use_tmp = not onnx_path
+    if use_tmp:
         tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)
         onnx_path = tmp.name
         tmp.close()
@@ -81,7 +86,7 @@ def parse_model(model, *example_args, model_name: str = "model",
             model,
             args=example_args,
             f=onnx_path,
-            opset_version=17,
+            opset_version=18,
             input_names=["input"],
             output_names=["output"],
         )
@@ -100,6 +105,13 @@ def parse_model(model, *example_args, model_name: str = "model",
         node.memory_bytes = estimate_memory_bytes(
             node.op_type, node.input_tensors, node.output_tensors
         )
+
+    # 清理临时 ONNX 文件（含 .onnx.data 权重文件）
+    if use_tmp:
+        for ext in ("", ".data"):
+            f = onnx_path + ext
+            if os.path.exists(f):
+                os.unlink(f)
 
     return graph
 
