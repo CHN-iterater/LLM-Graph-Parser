@@ -45,6 +45,7 @@ class OperatorSpec:
     category: str = "other"
     description: str = ""
     matching_patterns: list[str] = field(default_factory=list)
+    tags: set[str] = field(default_factory=set)  # 如 "attention" 等细粒度分类
     flops_fn: Optional[Callable] = None
     memory_fn: Optional[Callable] = None
 
@@ -156,6 +157,10 @@ class OperatorRegistry:
             if any(kw in name for kw in keywords):
                 return name, category
         return name, "other"
+
+    def get_by_tag(self, tag: str) -> list[OperatorSpec]:
+        """返回所有带指定 tag 的算子。"""
+        return [s for s in self._specs.values() if tag in s.tags]
 
     def list_specs(self) -> list[OperatorSpec]:
         return list(self._specs.values())

@@ -12,6 +12,47 @@ from typing import Any, Optional
 
 
 @dataclass
+class LayerNode:
+    """A hierarchical layer node in the computation graph.
+
+    Forms a tree: ``Model → Layer → SubLayer → Operator``.
+    """
+    layer_id: str
+    layer_type: str = ""          # "embedding", "transformer_block", "attention",
+                                  # "mlp", "lm_head", "norm", "unknown"
+    op_ids: list[str] = field(default_factory=list)  # Operators in this layer
+    children: list[LayerNode] = field(default_factory=list)
+    parent: Optional[LayerNode] = None
+
+    def add_child(self, child: LayerNode) -> None:
+        child.parent = self
+        self.children.append(child)
+
+    def num_ops(self) -> int:
+        return len(self.op_ids) + sum(c.num_ops() for c in self.children)
+
+    def total_flops(self, graph) -> int:
+        return sum(graph.get_node(oid).flops for oid in self.op_ids
+                   if graph.get_node(oid)) + sum(
+            c.total_flops(graph) for c in self.children)
+
+    def print_tree(self, indent: int = 0) -> None:
+        prefix = "  " * indent + "├── " if indent > 0 else ""
+        n_ops = self.num_ops()
+        print(f"{prefix}{self.layer_id} [{self.layer_type}] ({n_ops} ops)")
+        for child in self.children:
+            child.print_tree(indent + 1)
+
+    def to_dict(self) -> dict:
+        return {
+            "layer_id": self.layer_id,
+            "layer_type": self.layer_type,
+            "num_ops": self.num_ops(),
+            "children": [c.to_dict() for c in self.children],
+        }
+
+
+@dataclass
 class TensorMeta:
     """Metadata for a single tensor."""
     shape: tuple[int, ...]

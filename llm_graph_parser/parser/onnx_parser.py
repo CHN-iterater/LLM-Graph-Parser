@@ -154,7 +154,7 @@ class OnnxParser:
                 "onnx package is required. Install with: pip install onnx"
             )
 
-        self._model = onnx.load(str(path))
+        self._model = onnx.load(str(path), load_external_data=False)
         self._graph = self._model.graph
         self._build_tensor_map()
 
