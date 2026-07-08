@@ -179,5 +179,11 @@ LLM_Graph_Parser/
 │   └── utils/
 │       ├── flops_calculator.py
 │       └── memory_calculator.py
+├── tests/                        # 55 个单元测试
+│   ├── test_operator_registry.py
+│   ├── test_computation_graph.py
+│   ├── test_layer_partitioner.py
+│   ├── test_flops_calculator.py
+│   └── test_memory_calculator.py
 └── output/
 ```
