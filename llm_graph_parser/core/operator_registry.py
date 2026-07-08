@@ -205,11 +205,13 @@ class OperatorRegistry:
             name="ATTENTION", category="compute",
             description="Scaled dot-product attention (torch implementation)",
             matching_patterns=["scaled_dot_product_attention"],
+            tags={"attention"},
         ))
         registry.register(OperatorSpec(
             name="FLASH_ATTENTION", category="compute",
             description="FlashAttention (fused attention kernel)",
             matching_patterns=["flash_attention", "flash_attn"],
+            tags={"attention"},
         ))
 
         # ---- Normalization ----

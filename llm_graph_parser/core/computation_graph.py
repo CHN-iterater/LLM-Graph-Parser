@@ -61,6 +61,38 @@ class ComputationGraph:
             self._nodes[parent_id].children.append(child_id)
             self._nodes[child_id].parents.append(parent_id)
 
+    def get_edge_type(self, parent_id: str, child_id: str) -> str:
+        """返回边的类型: ``"intra_layer"``, ``"cross_layer"``, ``"unknown"``."""
+        p = self._nodes.get(parent_id)
+        c = self._nodes.get(child_id)
+        if p is None or c is None:
+            return "unknown"
+        if p.layer_id and c.layer_id and p.layer_id == c.layer_id:
+            return "intra_layer"
+        return "cross_layer"
+
+    def get_intra_layer_edges(self, layer_id: str) -> list[tuple[str, str]]:
+        """获取层内所有边: [(parent_id, child_id), ...]."""
+        edges = []
+        for oid in self._layer_map.get(layer_id, []):
+            node = self._nodes.get(oid)
+            if node:
+                for cid in node.children:
+                    c = self._nodes.get(cid)
+                    if c and c.layer_id == layer_id:
+                        edges.append((oid, cid))
+        return edges
+
+    def get_cross_layer_edges(self) -> list[tuple[str, str, str, str]]:
+        """获取所有跨层边: [(parent_id, p_layer, child_id, c_layer), ...]."""
+        edges = []
+        for nid, node in self._nodes.items():
+            for cid in node.children:
+                c = self._nodes.get(cid)
+                if c and node.layer_id and c.layer_id and node.layer_id != c.layer_id:
+                    edges.append((nid, node.layer_id, cid, c.layer_id))
+        return edges
+
     def get_node(self, op_id: str) -> Optional[OperatorNode]:
         return self._nodes.get(op_id)
 
@@ -134,8 +166,8 @@ class ComputationGraph:
     def save_layer_report(self, output_dir: str | Path, name: str = '') -> Path:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        stem = name or "layer"
-        path = output_dir / f"{stem}_layer_report.txt"
+        stem = f"{name}_" if name else ""
+        path = output_dir / f"{stem}layer_report.txt"
         with open(path, 'w', encoding='utf-8') as f:
             f.write(self.layer_report_text())
         return path
@@ -482,8 +514,8 @@ class ComputationGraph:
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        stem = name or "parallel"
-        path = output_dir / f"{stem}_parallel_report.txt"
+        stem = f"{name}_" if name else ""
+        path = output_dir / f"{stem}parallel_report.txt"
         with open(path, "w", encoding="utf-8") as f:
             f.write(self.parallelism_report()["text"])
         return path
@@ -589,8 +621,8 @@ class ComputationGraph:
         """保存 KV cache 跨输入依赖分析报告。"""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        stem = name or "kvcache"
-        path = output_dir / f"{stem}_kvcache_report.txt"
+        stem = f"{name}_" if name else ""
+        path = output_dir / f"{stem}kvcache_report.txt"
         with open(path, "w", encoding="utf-8") as f:
             f.write(self.kv_cache_analysis(
                 num_decode_tokens=num_decode_tokens)["text"])
@@ -763,8 +795,8 @@ class ComputationGraph:
         """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        stem = name or "phase"
-        path = output_dir / f"{stem}_phase_report.txt"
+        stem = f"{name}_" if name else ""
+        path = output_dir / f"{stem}phase_report.txt"
         with open(path, "w", encoding="utf-8") as f:
             f.write(self.stage_comparison_text(hardware_profile=hardware_profile))
         return path

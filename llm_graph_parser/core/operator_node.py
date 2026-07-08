@@ -28,8 +28,13 @@ class LayerNode:
         child.parent = self
         self.children.append(child)
 
-    def num_ops(self) -> int:
-        return len(self.op_ids) + sum(c.num_ops() for c in self.children)
+    def num_ops(self, _visited: set | None = None) -> int:
+        if _visited is None:
+            _visited = set()
+        if id(self) in _visited:
+            return 0
+        _visited.add(id(self))
+        return len(self.op_ids) + sum(c.num_ops(_visited) for c in self.children)
 
     def total_flops(self, graph) -> int:
         return sum(graph.get_node(oid).flops for oid in self.op_ids

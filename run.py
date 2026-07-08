@@ -12,10 +12,10 @@ from llm_graph_parser.core.phase_splitter import PhaseSplitter
 # ====================================================================
 # 配置区
 # ====================================================================
-MODE = "onnx"                         # "pytorch" 或 "onnx"
+MODE = "pytorch"                         # "pytorch" 或 "onnx"
 
 # ---- PyTorch ----
-MODEL_SOURCE = "../Models/gpt2"
+MODEL_SOURCE = "../Models/Qwen3-0.6B"
 PROMPTS = [
     "Hello, how are you?",
     "What is the capital of France?",
@@ -119,12 +119,17 @@ def run_pytorch_mode():
             except Exception:
                 pass
 
-        # ---- Combine ----
+        # ---- Combine (保留 DAG 边) ----
         combined = prefill_graph
         for n in decode_graph.nodes:
+            old_id = n.op_id
             n.op_id = f"dc_{n.op_id}"
-            n.parents, n.children = [], []
+            # 更新 parents/children 中的旧 ID
+            n.parents = [f"dc_{p}" if not p.startswith("dc_") else p for p in n.parents]
+            n.children = [f"dc_{c}" if not c.startswith("dc_") else c for c in n.children]
             combined.add_node(n)
+            # 重新建立 DAG 边
+            combined._layer_map[n.layer_id].append(n.op_id)
         combined._layer_tree = prefill_graph._layer_tree
         combined._layer_map = prefill_graph._layer_map
 
@@ -178,7 +183,8 @@ def run_pytorch_mode():
         prefill_graph.save_to_json(output_dir, name=f"{prefix}_prefill" if prefix else "prefill")
         if gen_len > 0:
             decode_graph.save_to_json(output_dir, name=f"{prefix}_decode" if prefix else "decode")
-        Path(output_dir).joinpath(f"{prefix}summary.txt").write_text(text, encoding="utf-8")
+        stem_s = f"{prefix}_" if prefix else ""
+        Path(output_dir).joinpath(f"{stem_s}summary.txt").write_text(text, encoding="utf-8")
         combined.save_phase_report(output_dir, name=prefix, hardware_profile=HARDWARE)
         combined.save_parallelism_report(output_dir, name=prefix)
         prefill_graph.save_layer_report(output_dir, name=prefix)
@@ -206,6 +212,8 @@ def run_onnx_mode():
     print(f"  算子节点数: {graph.num_nodes}")
 
     # Stage tagging
+    graph.prompt_text = os.path.basename(ONNX_PATH)
+    graph.prompt_tokens = 0
     graph.tag_unassigned_as("prefill")
     pf = graph.get_stage_stats("prefill")
     print(f"  Prefill: {pf['num_ops']} ops, {pf['total_flops']/1e6:.2f}M FLOPs, AI={pf['arith_intensity']:.2f}")

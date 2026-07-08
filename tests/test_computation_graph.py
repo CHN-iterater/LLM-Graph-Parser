@@ -130,6 +130,51 @@ class TestComputationGraph:
         assert pf.num_nodes == 1
         assert dc.num_nodes == 1
 
+    def test_edge_type_intra(self):
+        g = ComputationGraph("test")
+        a = _make_node("A", "LINEAR")
+        a.layer_id = "layer_0"
+        b = _make_node("B", "LINEAR")
+        b.layer_id = "layer_0"
+        g.add_node(a); g.add_node(b)
+        g.add_edge("A", "B")
+        assert g.get_edge_type("A", "B") == "intra_layer"
+
+    def test_edge_type_cross(self):
+        g = ComputationGraph("test")
+        a = _make_node("A", "LINEAR")
+        a.layer_id = "layer_0"
+        b = _make_node("B", "LINEAR")
+        b.layer_id = "layer_1"
+        g.add_node(a); g.add_node(b)
+        g.add_edge("A", "B")
+        assert g.get_edge_type("A", "B") == "cross_layer"
+
+    def test_edge_type_unknown(self):
+        g = ComputationGraph("test")
+        assert g.get_edge_type("NONEXIST", "NONEXIST") == "unknown"
+
+    def test_intra_layer_edges(self):
+        g = ComputationGraph("test")
+        for nid in ["A", "B", "C"]:
+            n = _make_node(nid, "OP")
+            n.layer_id = "layer_0"
+            g.add_node(n)
+        g.add_edge("A", "B"); g.add_edge("B", "C")
+        edges = g.get_intra_layer_edges("layer_0")
+        assert len(edges) == 2
+
+    def test_cross_layer_edges(self):
+        g = ComputationGraph("test")
+        a = _make_node("A", "LINEAR"); a.layer_id = "layer_0"
+        b = _make_node("B", "LINEAR"); b.layer_id = "layer_1"
+        g.add_node(a); g.add_node(b)
+        g.add_edge("A", "B")
+        edges = g.get_cross_layer_edges()
+        assert len(edges) == 1
+        assert edges[0][1] == "layer_0"  # parent layer
+        assert edges[0][3] == "layer_1"  # child layer
+
     def test_layer_grouping(self):
         g = ComputationGraph("test")
         a = _make_node("A", "LINEAR")

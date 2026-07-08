@@ -26,7 +26,8 @@ def _dtype_bytes(dtype_str: str) -> int:
 def _numel(shape: tuple[int, ...]) -> int:
     count = 1
     for d in shape:
-        count *= d
+        if d > 0:
+            count *= d
     return count
 
 

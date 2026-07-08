@@ -96,18 +96,31 @@ def _bmm_flops(inputs: list[TensorMeta],
 
 def _attention_flops(inputs: list[TensorMeta],
                      outputs: list[TensorMeta]) -> int:
-    """FLOPs for attention: 4 * B * H * T * T * d.
+    """FLOPs for attention: Q@K^T + attn@V.
 
-    Simplified estimate for scaled dot-product attention.
+    分解式: 4 * B * H * T * T * d  (Q/K/V 分开)
+    融合式 (GQA): 4 * B * T * T * hidden  (从 input/output shape 推断)
     """
     if not inputs:
         return 0
     q_shape = inputs[0].shape
-    if len(q_shape) < 4:
-        return 0
-    dims = [d if d > 0 else 1 for d in q_shape[-4:]]
-    B, H, T, d = dims
-    return 4 * B * H * T * T * d
+
+    # 分解式 attention (B, H, T, d)
+    if len(q_shape) >= 4:
+        dims = [d if d > 0 else 1 for d in q_shape[-4:]]
+        B, H, T, d = dims
+        return 4 * B * H * T * T * d
+
+    # 融合式 attention (B, T, hidden) 如 GroupQueryAttention
+    if len(q_shape) >= 2:
+        dims = [d if d > 0 else 1 for d in q_shape]
+        B = dims[0] if len(dims) >= 3 else 1
+        T = dims[1] if len(dims) >= 3 else dims[0]
+        hidden = dims[-1]
+        # 简化: 4 * B * hidden * T^2
+        return 4 * B * hidden * T * T
+
+    return 0
 
 
 def _norm_flops(inputs: list[TensorMeta],
