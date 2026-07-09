@@ -76,6 +76,8 @@ def run_pytorch_mode():
         prompt_ids = inputs["input_ids"]
         if HARDWARE_PROFILING and profiler.available:
             prompt_ids = prompt_ids.to(device)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
         attention_mask = inputs.get("attention_mask")
         seq_len = prompt_ids.shape[1]
         prefix = f"prompt_{i}" if len(PROMPTS) > 1 else ""
@@ -130,6 +132,7 @@ def run_pytorch_mode():
                         print(f"    generate time={gen_time/1000:.2f}ms")
                     except Exception as pe:
                         print(f"    [profiler] generate trace failed: {pe}")
+                        out = None
                 else:
                     out = model.generate(prompt_ids, **kw)
             if out is not None:

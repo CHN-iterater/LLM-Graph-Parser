@@ -79,7 +79,7 @@ class HardwareProfiler:
             if evt.device_type == torch.profiler.DeviceType.CUDA and evt.name != "Context":
                 self._trace_data.append({
                     "name": evt.name,
-                    "duration_us": getattr(evt, "duration_us", getattr(evt, "duration", getattr(evt, "cuda_time", 0))),
+                    "duration_us": getattr(evt, "duration_us", getattr(evt, "duration", getattr(evt, "device_time", getattr(evt, "cuda_time", 0)))),
                     "input_shapes": [],
                     "call_stack": [],
                     "cpu_time_us": getattr(evt, "cpu_time", 0),
