@@ -74,11 +74,11 @@ def run_pytorch_mode():
     for i, prompt in enumerate(PROMPTS):
         inputs = tokenizer(prompt, return_tensors="pt")
         prompt_ids = inputs["input_ids"]
+        attention_mask = inputs.get("attention_mask")
         if HARDWARE_PROFILING and profiler.available:
             prompt_ids = prompt_ids.to(device)
             if attention_mask is not None:
                 attention_mask = attention_mask.to(device)
-        attention_mask = inputs.get("attention_mask")
         seq_len = prompt_ids.shape[1]
         prefix = f"prompt_{i}" if len(PROMPTS) > 1 else ""
 
