@@ -57,14 +57,6 @@ def parse_model(model, *example_args, model_name: str = "model",
                 "Model " + model_name + " cannot export to ONNX. "
                 "Data-dependent control flow detected. "
                 "PyTorch 2.12 torch.export does not support this pattern.")
-        elif "UnsupportedOperatorError" in type(e).__name__:
-            print(f"  [export] ONNX does not support an operator in this model.")
-            print(f"  Try: 1) switch to MODE=\"onnx\" with a pre-exported .onnx file")
-            print(f"       2) use a standard model like GPT-2 / LLaMA / Qwen")
-            raise RuntimeError(
-                "Model " + model_name + " contains ONNX-incompatible ops. "
-                "Use MODE='onnx' with a pre-exported .onnx file, "
-                "or try a standard Transformer model.")
         else:
             print(f"  [export] FAILED: {type(e).__name__}: {e}")
             raise
