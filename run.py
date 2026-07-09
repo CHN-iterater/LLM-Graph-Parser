@@ -214,6 +214,12 @@ def run_pytorch_mode():
         prefill_graph.save_layer_report(output_dir, name=prefix)
         if gen_len > 0:
             decode_graph.save_kv_cache_report(output_dir, name=prefix, num_decode_tokens=gen_len)
+        if HARDWARE_PROFILING and profiler.available:
+            try:
+                profiler.save_report(output_dir, name=prefix)
+                profiler.trace_to_json(output_dir, name=prefix)
+            except Exception as pe:
+                print(f"    [profiler] save failed: {pe}")
 
         print("\n" + "=" * 60)
         print(text)
