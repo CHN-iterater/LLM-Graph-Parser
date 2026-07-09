@@ -8,6 +8,7 @@ os.environ.setdefault("HF_HOME", "D:/Hugging Face")
 
 from llm_graph_parser import parse_model, parse_onnx
 from llm_graph_parser.core.phase_splitter import PhaseSplitter
+from llm_graph_parser.hardware import HardwareProfiler
 
 # ====================================================================
 # 配置区
@@ -23,9 +24,10 @@ PROMPTS = [
 MAX_NEW_TOKENS = 20
 SKIP_GENERATION = False
 TRUST_REMOTE_CODE = True
+HARDWARE_PROFILING = False               # True = 用 CUDA Event 测量推理延迟(需 GPU)
 
 # ---- ONNX ----
-ONNX_PATH = "../Models/ONNXs/Llama-3.2-1B.onnx"
+ONNX_PATH = "../Models/ONNXs/Kokoro-82M.onnx"
 
 # ---- 硬件 ----
 HARDWARE = {"peak_flops": 1979e12, "memory_bw": 3350e9}  # H100
@@ -57,6 +59,14 @@ def run_pytorch_mode():
     model.eval()
     print(f"  参数总量: {sum(p.numel() for p in model.parameters()):,}")
 
+    profiler = HardwareProfiler()
+    if HARDWARE_PROFILING and not profiler.available:
+        print("  [hardware] HARDWARE_PROFILING=True 但未检测到 GPU,跳过 profiling")
+    if profiler.available:
+        print(f"  [hardware] GPU: {torch.cuda.get_device_name(0)}")
+        if not HARDWARE_PROFILING:
+            print("  [hardware] 设置 HARDWARE_PROFILING=True 启用延迟测量")
+
     for i, prompt in enumerate(PROMPTS):
         inputs = tokenizer(prompt, return_tensors="pt")
         prompt_ids = inputs["input_ids"]
@@ -70,6 +80,8 @@ def run_pytorch_mode():
 
         # Step 1: Prefill
         print(f"  [Phase 1/3] Prefill")
+        if HARDWARE_PROFILING and profiler.available:
+            _ = profiler.time_forward(model, prompt_ids, label="prefill")
         prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
         prefill_graph.prompt_text = prompt
         prefill_graph.prompt_tokens = seq_len
@@ -77,6 +89,8 @@ def run_pytorch_mode():
         pf = prefill_graph.get_stage_stats("prefill")
         print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, "
               f"AI={pf['arith_intensity']:.2f}")
+        if HARDWARE_PROFILING and profiler.available:
+            print(f"    time={profiler._prefill_total_us/1000:.2f}ms")
 
         # Step 2: Decode
         print(f"  [Phase 2/3] Decode (1 token)")
@@ -103,9 +117,16 @@ def run_pytorch_mode():
                 for k, v in model.generation_config.to_dict().items():
                     if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
                         kw[k] = v
-                out = model.generate(prompt_ids, **kw)
-            gen_len = out.shape[1] - seq_len
-            answer = tokenizer.decode(out[0, seq_len:], skip_special_tokens=True).strip()
+                if HARDWARE_PROFILING and profiler.available:
+                    gen_len, gen_time = profiler.time_generate(model, prompt_ids, **kw)
+                    out = None  # already generated inside time_generate
+                    print(f"    generate time={gen_time/1000:.2f}ms")
+                else:
+                    out = model.generate(prompt_ids, **kw)
+            if out is not None:
+                gen_len = out.shape[1] - seq_len
+            answer = tokenizer.decode(out[0, seq_len:] if out is not None else prompt_ids[0],
+                                      skip_special_tokens=True).strip()
             print(f"    generated: {gen_len} tokens")
             print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
             if gen_len == 0:
