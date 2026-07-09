@@ -118,9 +118,12 @@ def run_pytorch_mode():
                     if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
                         kw[k] = v
                 if HARDWARE_PROFILING and profiler.available:
-                    gen_len, gen_time = profiler.trace_generate(model, prompt_ids, **kw)
-                    out = None  # already generated inside time_generate
-                    print(f"    generate time={gen_time/1000:.2f}ms")
+                    try:
+                        gen_len, gen_time = profiler.trace_generate(model, prompt_ids, **kw)
+                        out = None
+                        print(f"    generate time={gen_time/1000:.2f}ms")
+                    except Exception as pe:
+                        print(f"    [profiler] generate trace failed: {pe}")
                 else:
                     out = model.generate(prompt_ids, **kw)
             if out is not None:
