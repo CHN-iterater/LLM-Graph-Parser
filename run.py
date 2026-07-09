@@ -14,8 +14,8 @@ from llm_graph_parser.hardware import HardwareProfiler
 # 配置区
 # ====================================================================
 MODE = "pytorch"
-MODEL_SOURCE = "../Models/Forge-1-Mini"
-PROMPTS = ["Hello, how are you?", "What is the capital of France?"]
+MODEL_SOURCE = "../Models/Qwen3-0.6B"
+PROMPT = "What's the capital of France?"
 MAX_NEW_TOKENS = 20
 SKIP_GENERATION = False
 TRUST_REMOTE_CODE = True
@@ -61,7 +61,7 @@ def _summary_header(model_label, prompt, answer, seq_len, gen_len, pf, dc, dc_to
     return lines
 
 
-def _summary_extra(graph, combined, decode_graph, gen_len, pf_ai):
+def _summary_extra(graph, combined, decode_graph, gen_len, pf_ai, profiler=None):
     """层结构 + 并行性 + Roofline + 算子分布。"""
     lines = []
     tree = graph.get_layer_tree()
@@ -86,6 +86,43 @@ def _summary_extra(graph, combined, decode_graph, gen_len, pf_ai):
 
     lines.append("")
     lines.append("Operator counts:")
+
+    # Hardware profiling info
+    if profiler and profiler.available:
+        tot_t = profiler._prefill_total_us + profiler._decode_total_us
+        ms_pf = profiler._prefill_total_us / 1000
+        ms_dc = profiler._decode_total_us / 1000
+        mem = profiler._memory_peak / 1e6
+        evts = profiler._trace_data
+
+        n_all = len(evts)
+        n_real = sum(1 for e in evts if e["duration_us"] > 0)
+        n_copy = sum(1 for e in evts if "Memcpy" in e["name"] or b"Memset" in e["name"].encode())
+        t_real = sum(e["duration_us"] for e in evts if e["duration_us"] > 0) / 1000
+        t_total = tot_t / 1000
+
+        tot_f = sum(n.flops for n in combined.nodes)
+        tot_b = sum(n.memory_bytes for n in combined.nodes)
+        peak_bw = HARDWARE["memory_bw"] / 1e9
+
+        if ms_pf > 0 or ms_dc > 0:
+            lines.append(f"    GPU time: Prefill={ms_pf:.2f}ms, Decode={ms_dc:.2f}ms")
+        if n_real > 0:
+            lines.append(f"    GPU kernels: {n_real} compute + {n_copy} copy, "
+                         f"peak mem={mem:.0f}MB")
+            lines.append(f"    Avg kernel: {t_real/n_real:.1f}us, "
+                         f"compute time ratio={t_real/t_total*100:.1f}%")
+        if t_total > 0 and tot_b > 0:
+            bw = tot_b / t_total / 1e6  # bytes/ms = GB/s
+            util = bw / peak_bw * 100
+            lines.append(f"    Achieved BW: {bw:.0f} GB/s ({util:.0f}% of H100 peak)")
+            flops_util = tot_f / (t_total / 1000) / (HARDWARE["peak_flops"] / 1e12) * 100
+            lines.append(f"    FLOPs util: {flops_util:.1f}% ({tot_f/1e12:.2f} TFLOPs / "
+                         f"{t_total/1000:.2f}s)")
+        if gen_len > 0 and ms_dc > 0:
+            tps = gen_len / (ms_dc / 1000)
+            lines.append(f"    Throughput: {tps:.1f} tokens/s")
+
     for op, cnt in sorted(combined.get_operator_counts().items(), key=lambda x: -x[1]):
         lines.append(f"  {op:25s}: {cnt}")
     return lines
@@ -126,116 +163,116 @@ def run_pytorch_mode():
         if not HARDWARE_PROFILING:
             print("  [hardware] 设置 HARDWARE_PROFILING=True 启用延迟测量")
 
-    for i, prompt in enumerate(PROMPTS):
-        inputs = tokenizer(prompt, return_tensors="pt")
-        prompt_ids = inputs["input_ids"]
-        attention_mask = inputs.get("attention_mask")
-        if HARDWARE_PROFILING and profiler.available:
-            prompt_ids = prompt_ids.to(device)
+    prompt = PROMPT
+    inputs = tokenizer(prompt, return_tensors="pt")
+    prompt_ids = inputs["input_ids"]
+    attention_mask = inputs.get("attention_mask")
+    if HARDWARE_PROFILING and profiler.available:
+        prompt_ids = prompt_ids.to(device)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(device)
+    seq_len = prompt_ids.shape[1]
+    prefix = ""
+
+    print(f"\n{'=' * 60}")
+    print(f"  Prompt [{i}]: \"{prompt}\"")
+    print(f"  tokens: {seq_len}")
+
+    # Step 1: Prefill
+    print(f"  [Phase 1/3] Prefill")
+    if HARDWARE_PROFILING and profiler.available:
+        _ = profiler.trace(model, prompt_ids, label="prefill")
+    prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
+    prefill_graph.prompt_text = prompt
+    prefill_graph.prompt_tokens = seq_len
+    prefill_graph.tag_unassigned_as("prefill")
+    pf = prefill_graph.get_stage_stats("prefill")
+    print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
+    if HARDWARE_PROFILING and profiler.available:
+        print(f"    time={profiler._prefill_total_us/1000:.2f}ms")
+
+    # Step 2: Decode
+    print(f"  [Phase 2/3] Decode (1 token)")
+    decode_token = prompt_ids[:, -1:]
+    decode_graph = parse_model(model, decode_token, model_name=model_label, onnx_path="")
+    decode_graph.prompt_tokens = 1
+    decode_graph.tag_unassigned_as("decode")
+    dc = decode_graph.get_stage_stats("decode")
+    dc_flops_per = dc["total_flops"]
+    print(f"    per-step: ops={dc['num_ops']}, FLOPs={dc_flops_per/1e6:.2f}M, AI={dc['arith_intensity']:.2f}")
+
+    # Step 3: Generation
+    if SKIP_GENERATION:
+        gen_len, answer = 0, ""
+        print(f"  [Phase 3/3] Skipped (SKIP_GENERATION=True)")
+    else:
+        print(f"  [Phase 3/3] Generating (max {MAX_NEW_TOKENS})...")
+        with torch.no_grad():
+            kw = dict(max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
             if attention_mask is not None:
-                attention_mask = attention_mask.to(device)
-        seq_len = prompt_ids.shape[1]
-        prefix = f"prompt_{i}" if len(PROMPTS) > 1 else ""
-
-        print(f"\n{'=' * 60}")
-        print(f"  Prompt [{i}]: \"{prompt}\"")
-        print(f"  tokens: {seq_len}")
-
-        # Step 1: Prefill
-        print(f"  [Phase 1/3] Prefill")
-        if HARDWARE_PROFILING and profiler.available:
-            _ = profiler.trace(model, prompt_ids, label="prefill")
-        prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
-        prefill_graph.prompt_text = prompt
-        prefill_graph.prompt_tokens = seq_len
-        prefill_graph.tag_unassigned_as("prefill")
-        pf = prefill_graph.get_stage_stats("prefill")
-        print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
-        if HARDWARE_PROFILING and profiler.available:
-            print(f"    time={profiler._prefill_total_us/1000:.2f}ms")
-
-        # Step 2: Decode
-        print(f"  [Phase 2/3] Decode (1 token)")
-        decode_token = prompt_ids[:, -1:]
-        decode_graph = parse_model(model, decode_token, model_name=model_label, onnx_path="")
-        decode_graph.prompt_tokens = 1
-        decode_graph.tag_unassigned_as("decode")
-        dc = decode_graph.get_stage_stats("decode")
-        dc_flops_per = dc["total_flops"]
-        print(f"    per-step: ops={dc['num_ops']}, FLOPs={dc_flops_per/1e6:.2f}M, AI={dc['arith_intensity']:.2f}")
-
-        # Step 3: Generation
-        if SKIP_GENERATION:
-            gen_len, answer = 0, ""
-            print(f"  [Phase 3/3] Skipped (SKIP_GENERATION=True)")
-        else:
-            print(f"  [Phase 3/3] Generating (max {MAX_NEW_TOKENS})...")
-            with torch.no_grad():
-                kw = dict(max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
-                if attention_mask is not None:
-                    kw["attention_mask"] = attention_mask
-                for k, v in model.generation_config.to_dict().items():
-                    if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
-                        kw[k] = v
-                out = model.generate(prompt_ids, **kw)
-            gen_len = out.shape[1] - seq_len
-            answer = tokenizer.decode(out[0, seq_len:], skip_special_tokens=True).strip()
-            print(f"    generated: {gen_len} tokens")
-            print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
-            if gen_len == 0:
-                print("    (no output - model may need different prompts)")
-            if HARDWARE_PROFILING and profiler.available:
-                try:
-                    _ = profiler.trace_generate(model, prompt_ids, **kw)
-                except Exception as pe:
-                    print(f"    [profiler] trace failed: {pe}")
-
-        # ---- Layer partitioner ----
-        for g in (prefill_graph, decode_graph):
-            try:
-                g.set_layer_tree(LayerPartitioner(g).partition())
-            except Exception:
-                pass
-
-        # ---- Combine ----
-        combined = prefill_graph
-        for n in decode_graph.nodes:
-            n.op_id = f"dc_{n.op_id}"
-            n.parents = [f"dc_{p}" if not p.startswith("dc_") else p for p in n.parents]
-            n.children = [f"dc_{c}" if not c.startswith("dc_") else c for c in n.children]
-            combined.add_node(n)
-            combined._layer_map[n.layer_id].append(n.op_id)
-        combined._layer_tree = prefill_graph._layer_tree
-        combined._layer_map = prefill_graph._layer_map
-
-        # ---- Build summary ----
-        total_dc = dc_flops_per * gen_len
-        lines = _summary_header(model_label, prompt, answer, seq_len, gen_len, pf, dc, total_dc)
-        lines += _summary_extra(prefill_graph, combined, decode_graph, gen_len, pf["arith_intensity"])
-        text = "\n".join(lines)
-
-        # ---- Save ----
-        combined.save_to_json(output_dir, name=prefix)
-        prefill_graph.save_to_json(output_dir, name=f"{prefix}_prefill" if prefix else "prefill")
-        if gen_len > 0:
-            decode_graph.save_to_json(output_dir, name=f"{prefix}_decode" if prefix else "decode")
-        stem = f"{prefix}_" if prefix else ""
-        Path(output_dir).joinpath(f"{stem}summary.txt").write_text(text, encoding="utf-8")
-        combined.save_phase_report(output_dir, name=prefix, hardware_profile=HARDWARE)
-        combined.save_parallelism_report(output_dir, name=prefix)
-        prefill_graph.save_layer_report(output_dir, name=prefix)
-        if gen_len > 0:
-            decode_graph.save_kv_cache_report(output_dir, name=prefix, num_decode_tokens=gen_len)
+                kw["attention_mask"] = attention_mask
+            for k, v in model.generation_config.to_dict().items():
+                if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
+                    kw[k] = v
+            out = model.generate(prompt_ids, **kw)
+        gen_len = out.shape[1] - seq_len
+        answer = tokenizer.decode(out[0, seq_len:], skip_special_tokens=True).strip()
+        print(f"    generated: {gen_len} tokens")
+        print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
+        if gen_len == 0:
+            print("    (no output - model may need different prompts)")
         if HARDWARE_PROFILING and profiler.available:
             try:
-                profiler.save_report(output_dir, name=prefix)
-                profiler.trace_to_json(output_dir, name=prefix)
+                _ = profiler.trace_generate(model, prompt_ids, **kw)
             except Exception as pe:
-                print(f"    [profiler] save failed: {pe}")
+                print(f"    [profiler] trace failed: {pe}")
 
-        print("\n" + "=" * 60)
-        print(text)
-        print("=" * 60)
+    # ---- Layer partitioner ----
+    for g in (prefill_graph, decode_graph):
+        try:
+            g.set_layer_tree(LayerPartitioner(g).partition())
+        except Exception:
+            pass
+
+    # ---- Combine ----
+    combined = prefill_graph
+    for n in decode_graph.nodes:
+        n.op_id = f"dc_{n.op_id}"
+        n.parents = [f"dc_{p}" if not p.startswith("dc_") else p for p in n.parents]
+        n.children = [f"dc_{c}" if not c.startswith("dc_") else c for c in n.children]
+        combined.add_node(n)
+        combined._layer_map[n.layer_id].append(n.op_id)
+    combined._layer_tree = prefill_graph._layer_tree
+    combined._layer_map = prefill_graph._layer_map
+
+    # ---- Build summary ----
+    total_dc = dc_flops_per * gen_len
+    lines = _summary_header(model_label, prompt, answer, seq_len, gen_len, pf, dc, total_dc)
+    lines += _summary_extra(prefill_graph, combined, decode_graph, gen_len, pf["arith_intensity"], profiler)
+    text = "\n".join(lines)
+
+    # ---- Save ----
+    combined.save_to_json(output_dir, name=prefix)
+    prefill_graph.save_to_json(output_dir, name=f"{prefix}_prefill" if prefix else "prefill")
+    if gen_len > 0:
+        decode_graph.save_to_json(output_dir, name=f"{prefix}_decode" if prefix else "decode")
+    stem = f"{prefix}_" if prefix else ""
+    Path(output_dir).joinpath(f"{stem}summary.txt").write_text(text, encoding="utf-8")
+    combined.save_phase_report(output_dir, name=prefix, hardware_profile=HARDWARE)
+    combined.save_parallelism_report(output_dir, name=prefix)
+    prefill_graph.save_layer_report(output_dir, name=prefix)
+    if gen_len > 0:
+        decode_graph.save_kv_cache_report(output_dir, name=prefix, num_decode_tokens=gen_len)
+    if HARDWARE_PROFILING and profiler.available:
+        try:
+            profiler.save_report(output_dir, name=prefix)
+            profiler.trace_to_json(output_dir, name=prefix)
+        except Exception as pe:
+            print(f"    [profiler] save failed: {pe}")
+
+    print("\n" + "=" * 60)
+    print(text)
+    print("=" * 60)
 
     print(f"\n所有结果已保存到: {output_dir}/")
 

@@ -1,4 +1,4 @@
-"""LLM Graph Parser - 大语言模型计算图的层级化解析工具。"""
+"""LLM Graph Parser — 高入 API: parse_model() / parse_onnx()."""
 
 from .core import (
     OperatorNode, TensorMeta, OperatorRegistry, OperatorSpec,
@@ -9,14 +9,22 @@ from .hardware import HardwareProfile, get_profile
 from .config import ParserConfig
 
 
+def _annotate_flops(graph):
+    """Annotate each node with estimated FLOPs and memory bytes."""
+    from .utils.flops_calculator import estimate_flops
+    from .utils.memory_calculator import estimate_memory_bytes
+    for node in graph.nodes:
+        node.flops = estimate_flops(node.op_type, node.input_tensors, node.output_tensors)
+        node.memory_bytes = estimate_memory_bytes(
+            node.op_type, node.input_tensors, node.output_tensors)
+
+
 def parse_model(model, *example_args, model_name: str = "model",
                 registry=None, onnx_path: str = "") -> ComputationGraph:
-    """解析 PyTorch 模型的计算图。"""
+    """Export a PyTorch model to ONNX and parse its computation graph."""
     import os, tempfile, warnings
     import torch
     from .parser.onnx_parser import OnnxParser
-    from .utils.flops_calculator import estimate_flops
-    from .utils.memory_calculator import estimate_memory_bytes
 
     warnings.filterwarnings("ignore", category=FutureWarning, module="copyreg")
     warnings.filterwarnings("ignore", message=".*torchvision.*")
@@ -38,30 +46,25 @@ def parse_model(model, *example_args, model_name: str = "model",
     else:
         os.makedirs(os.path.dirname(onnx_path) or ".", exist_ok=True)
 
-    # 导出 ONNX
     graph = None
     try:
         torch.onnx.export(
             model, example_args, onnx_path, opset_version=18,
             input_names=["input"], output_names=["output"],
-            external_data=False)  # 权重嵌入 .onnx，不产生 .onnx.data
+            external_data=False)
         parser = OnnxParser(registry=registry)
         parser.load(onnx_path)
         graph = parser.parse(model_name=model_name)
     except Exception as e:
         if "GuardOnDataDependentSymNode" in type(e).__name__:
-            print("  [export] FAILED: model has data-dependent control flow")
-            print("            (common in RoPE dynamic frequency update, e.g. HunYuan)")
-            print("            Suggestion: use GPT-2/LLaMA/Qwen standard models")
             raise RuntimeError(
-                "Model " + model_name + " cannot export to ONNX. "
-                "Data-dependent control flow detected. "
-                "PyTorch 2.12 torch.export does not support this pattern.")
-        else:
-            print(f"  [export] FAILED: {type(e).__name__}: {e}")
-            raise
+                f"Model {model_name} cannot export to ONNX. "
+                "The model has data-dependent control flow "
+                "(common in RoPE dynamic frequency update). "
+                "Use a standard model like GPT-2 / LLaMA / Qwen.")
+        print(f"  [export] FAILED: {type(e).__name__}: {e}")
+        raise
     finally:
-        # 无论成功还是失败，都清理临时文件
         if old_cache is not None:
             model.config.use_cache = old_cache
         if use_tmp:
@@ -70,27 +73,20 @@ def parse_model(model, *example_args, model_name: str = "model",
                 if os.path.exists(f):
                     os.unlink(f)
 
-    for node in graph.nodes:
-        node.flops = estimate_flops(node.op_type, node.input_tensors, node.output_tensors)
-        node.memory_bytes = estimate_memory_bytes(
-            node.op_type, node.input_tensors, node.output_tensors)
+    _annotate_flops(graph)
     return graph
 
 
 def parse_onnx(path: str, model_name: str = "", registry=None) -> ComputationGraph:
-    """直接解析 .onnx 文件的计算图。"""
+    """Load an ``.onnx`` file and parse its computation graph directly."""
     from .parser.onnx_parser import OnnxParser
-    from .utils.flops_calculator import estimate_flops
-    from .utils.memory_calculator import estimate_memory_bytes
+
     if registry is None:
         registry = OperatorRegistry.get_default()
     parser = OnnxParser(registry=registry)
     parser.load(path)
     graph = parser.parse(model_name=model_name)
-    for node in graph.nodes:
-        node.flops = estimate_flops(node.op_type, node.input_tensors, node.output_tensors)
-        node.memory_bytes = estimate_memory_bytes(
-            node.op_type, node.input_tensors, node.output_tensors)
+    _annotate_flops(graph)
     return graph
 
 

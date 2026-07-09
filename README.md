@@ -132,6 +132,7 @@ ONNX_PATH = "path/to/model.onnx"
 
 # ---- 硬件参数（Roofline 分析用） ----
 HARDWARE = {"peak_flops": 1979e12, "memory_bw": 3350e9}  # H100
+HARDWARE_PROFILING = False                # True = 用 torch.profiler 做 Kernel 级分析（需 GPU）
 ```
 
 ---
