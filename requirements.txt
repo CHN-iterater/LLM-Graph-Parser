@@ -1,6 +1,7 @@
 torch>=2.1.0
 numpy>=1.24
 onnx>=1.16
+onnxscript>=0.1.0
 
 # 模型加载
 transformers>=4.40.0
