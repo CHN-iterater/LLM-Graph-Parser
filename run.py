@@ -128,21 +128,13 @@ def run_pytorch_mode():
                 for k, v in model.generation_config.to_dict().items():
                     if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
                         kw[k] = v
-                if HARDWARE_PROFILING and profiler.available:
-                    try:
-                        gen_len, gen_time = profiler.trace_generate(model, prompt_ids, **kw)
-                        out = None
-                        print(f"    generate time={gen_time/1000:.2f}ms")
-                    except Exception as pe:
-                        print(f"    [profiler] generate trace failed: {pe}")
-                        out = None
-                        gen_len = 0
-                        answer = ""
-                        print("    (profiling failed, falling back to software analysis)")
-                else:
-                    out = model.generate(prompt_ids, **kw)
-            if out is not None:
-                gen_len = out.shape[1] - seq_len
+                out = model.generate(prompt_ids, **kw)
+            gen_len = out.shape[1] - seq_len
+            if HARDWARE_PROFILING and profiler.available:
+                try:
+                    _ = profiler.trace_generate(model, prompt_ids, **kw)
+                except Exception as pe:
+                    print(f"    [profiler] trace failed: {pe}")
             answer = tokenizer.decode(out[0, seq_len:] if out is not None else prompt_ids[0],
                                       skip_special_tokens=True).strip()
             print(f"    generated: {gen_len} tokens")
