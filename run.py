@@ -16,7 +16,7 @@ from llm_graph_parser.hardware import HardwareProfiler
 MODE = "pytorch"                         # "pytorch" 或 "onnx"
 
 # ---- PyTorch ----
-MODEL_SOURCE = "../Models/Qwen3-0.6B"
+MODEL_SOURCE = "../Models/Forge-1-Mini"
 PROMPTS = [
     "Hello, how are you?",
     "What is the capital of France?",

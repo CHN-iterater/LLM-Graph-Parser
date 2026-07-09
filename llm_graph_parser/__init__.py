@@ -57,6 +57,13 @@ def parse_model(model, *example_args, model_name: str = "model",
                 "Model " + model_name + " cannot export to ONNX. "
                 "Data-dependent control flow detected. "
                 "PyTorch 2.12 torch.export does not support this pattern.")
+        elif "UnsupportedOperatorError" in type(e).__name__:
+            print(f"  [export] ONNX does not support an operator in this model.")
+            print(f"  Falling back to torch.export.export + OperatorHook...")
+            ep = torch.export.export(model, example_args, strict=False)
+            from llm_graph_parser.hooks.operator_hook import OperatorHook
+            hook = OperatorHook(ep, registry=registry)
+            graph = hook.parse(model_name=model_name)
         else:
             print(f"  [export] FAILED: {type(e).__name__}: {e}")
             raise
