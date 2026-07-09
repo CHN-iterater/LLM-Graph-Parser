@@ -60,6 +60,10 @@ def run_pytorch_mode():
     print(f"  参数总量: {sum(p.numel() for p in model.parameters()):,}")
 
     profiler = HardwareProfiler()
+    device = torch.device("cuda" if (HARDWARE_PROFILING and torch.cuda.is_available()) else "cpu")
+    if HARDWARE_PROFILING and profiler.available:
+        model = model.to(device)
+        print(f"  [hardware] 模型已移至 {device}")
     if HARDWARE_PROFILING and not profiler.available:
         print("  [hardware] HARDWARE_PROFILING=True 但未检测到 GPU,跳过 profiling")
     if profiler.available:
@@ -70,6 +74,8 @@ def run_pytorch_mode():
     for i, prompt in enumerate(PROMPTS):
         inputs = tokenizer(prompt, return_tensors="pt")
         prompt_ids = inputs["input_ids"]
+        if HARDWARE_PROFILING and profiler.available:
+            prompt_ids = prompt_ids.to(device)
         attention_mask = inputs.get("attention_mask")
         seq_len = prompt_ids.shape[1]
         prefix = f"prompt_{i}" if len(PROMPTS) > 1 else ""
