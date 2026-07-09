@@ -63,6 +63,9 @@ def run_pytorch_mode():
     device = torch.device("cuda" if (HARDWARE_PROFILING and torch.cuda.is_available()) else "cpu")
     if HARDWARE_PROFILING and profiler.available:
         model = model.to(device)
+        for p in model.parameters():
+            if str(p.device) != str(device):
+                p.data = p.data.to(device)
         print(f"  [hardware] 模型已移至 {device}")
     if HARDWARE_PROFILING and not profiler.available:
         print("  [hardware] HARDWARE_PROFILING=True 但未检测到 GPU,跳过 profiling")
@@ -133,6 +136,9 @@ def run_pytorch_mode():
                     except Exception as pe:
                         print(f"    [profiler] generate trace failed: {pe}")
                         out = None
+                        gen_len = 0
+                        answer = ""
+                        print("    (profiling failed, falling back to software analysis)")
                 else:
                     out = model.generate(prompt_ids, **kw)
             if out is not None:
