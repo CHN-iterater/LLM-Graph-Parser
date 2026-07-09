@@ -76,14 +76,11 @@ class HardwareProfiler:
         # Process profiler events into kernel list
         self._trace_data = []
         for evt in prof.events():
-            if evt.device_type == torch.profiler.DeviceType.CUDA and evt.name != "Context":
-                self._trace_data.append({
-                    "name": evt.name,
-                    "duration_us": getattr(evt, "duration_us", getattr(evt, "duration", getattr(evt, "device_time", getattr(evt, "cuda_time", 0)))),
-                    "input_shapes": [],
-                    "call_stack": [],
-                    "cpu_time_us": getattr(evt, "cpu_time", 0),
-                })
+            name = evt.name if hasattr(evt, "name") else str(evt)
+            if "Context" in name:
+                continue
+            dur = getattr(evt, "duration_us", getattr(evt, "duration", getattr(evt, "device_time", 0)))
+            self._trace_data.append({"name": name, "duration_us": dur or 0})
 
         # Total time from events
         total_us = sum(e["duration_us"] for e in self._trace_data)
@@ -118,11 +115,11 @@ class HardwareProfiler:
 
         self._trace_data = []
         for evt in prof.events():
-            if evt.device_type == torch.profiler.DeviceType.CUDA and evt.name != "Context":
-                self._trace_data.append({
-                    "name": evt.name,
-                    "duration_us": getattr(evt, "duration_us", evt.duration),
-                })
+            name = evt.name if hasattr(evt, "name") else str(evt)
+            if "Context" in name:
+                continue
+            dur = getattr(evt, "duration_us", getattr(evt, "duration", getattr(evt, "device_time", 0)))
+            self._trace_data.append({"name": name, "duration_us": dur or 0})
 
         total_us = sum(e["duration_us"] for e in self._trace_data)
         gen_len = out.shape[1] - input_ids.shape[1]
