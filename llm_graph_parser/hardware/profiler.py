@@ -97,26 +97,34 @@ class HardwareProfiler:
 
     def trace_generate(self, model, input_ids, max_new_tokens=20,
                        **gen_kwargs) -> tuple[int, float]:
-        """Run ``model.generate()`` with profiling.
-
-        Due to profiler overhead on iterative generation, only captures
-        total time and memory (kernel-level trace uses single forward pass).
-        """
+        """Run ``model.generate()`` with ``torch.profiler``, capturing kernels."""
         if not self._available:
             return 0, 0.0
         import torch
 
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+        torch.cuda.reset_peak_memory_stats(self._device)
+        self._memory_start = torch.cuda.memory_allocated(self._device)
 
-        start_event.record()
         with torch.no_grad():
-            out = model.generate(input_ids, max_new_tokens=max_new_tokens,
-                                 **gen_kwargs)
-        end_event.record()
-        torch.cuda.synchronize()
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=True,
+                with_stack=False,
+            ) as prof:
+                out = model.generate(input_ids, max_new_tokens=max_new_tokens,
+                                     **gen_kwargs)
 
-        total_us = start_event.elapsed_time(end_event) * 1000
+        self._memory_peak = torch.cuda.max_memory_allocated(self._device)
+
+        self._trace_data = []
+        for evt in prof.events():
+            if evt.device_type == torch.profiler.DeviceType.CUDA and evt.name != "Context":
+                self._trace_data.append({
+                    "name": evt.name,
+                    "duration_us": evt.duration_us,
+                })
+
+        total_us = sum(e["duration_us"] for e in self._trace_data)
         gen_len = out.shape[1] - input_ids.shape[1]
         self._decode_total_us = total_us
 
