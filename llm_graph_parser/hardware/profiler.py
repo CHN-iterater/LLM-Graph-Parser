@@ -79,7 +79,7 @@ class HardwareProfiler:
             if evt.device_type == torch.profiler.DeviceType.CUDA and evt.name != "Context":
                 self._trace_data.append({
                     "name": evt.name,
-                    "duration_us": evt.duration_us,
+                    "duration_us": getattr(evt, "duration_us", evt.duration),
                     "input_shapes": getattr(evt, "input_shapes", []),
                     "call_stack": getattr(evt, "stack", []),
                     "cpu_time_us": getattr(evt, "cpu_time", 0),
@@ -121,7 +121,7 @@ class HardwareProfiler:
             if evt.device_type == torch.profiler.DeviceType.CUDA and evt.name != "Context":
                 self._trace_data.append({
                     "name": evt.name,
-                    "duration_us": evt.duration_us,
+                    "duration_us": getattr(evt, "duration_us", evt.duration),
                 })
 
         total_us = sum(e["duration_us"] for e in self._trace_data)
