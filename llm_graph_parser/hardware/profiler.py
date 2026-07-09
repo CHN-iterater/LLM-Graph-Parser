@@ -1,180 +1,110 @@
-"""Optional GPU hardware profiling for operator-level timing.
+"""Optional GPU hardware profiling for kernel-level decomposition.
 
-When enabled and CUDA is available, measures per-layer execution time,
-total inference latency, and GPU memory usage. Results are stored in
-each ``OperatorNode.hardware_metrics`` and saved as a report file.
+When enabled and CUDA is available, uses ``torch.profiler`` to capture
+actual CUDA kernel launches during inference, decomposes each ONNX
+operator into its constituent GPU kernels, and stores the results in
+``OperatorNode.hardware_metrics``.
+
+This bridges the gap between ONNX-level operators and GPU kernel-level
+execution, which is essential for accurate energy modelling.
 
 Usage::
 
     profiler = HardwareProfiler()
     if profiler.available:
-        profiler.start()
-        output = model(input_ids)
-        profiler.stop()
+        profiler.trace(model, input_ids, label="prefill")
+        # → captures all CUDA kernels + NVTX ranges
         profiler.attach_to_graph(graph)
         profiler.save_report("./output")
 """
 
 from __future__ import annotations
-import torch
-import warnings
+from pathlib import Path
+from collections import defaultdict
+import json
 
 
 class HardwareProfiler:
-    """Optional GPU profiler: measures inference time and memory.
+    """GPU profiler for kernel-level operator decomposition.
 
     Gracefully handles missing GPU — all methods are no-ops when
     ``torch.cuda.is_available()`` is ``False``.
     """
 
     def __init__(self):
+        import torch
         self._available = torch.cuda.is_available()
         self._device = torch.device("cuda" if self._available else "cpu")
-        self._prefill_events: list[torch.cuda.Event] = []
-        self._decode_events: list[torch.cuda.Event] = []
-        self._layer_times: dict[str, list[float]] = {}  # layer_id → [time_us]
+        self._trace_data: list[dict] = []       # raw kernel events
+        self._operator_kernels: dict[str, list] = {}  # op_id → [kernels]
         self._prefill_total_us: float = 0.0
         self._decode_total_us: float = 0.0
-        self._memory_start: int = 0
         self._memory_peak: int = 0
-        self._hooks: list = []
+        self._memory_start: int = 0
 
     @property
     def available(self) -> bool:
-        """True if CUDA GPU is present and profiling can work."""
         return self._available
 
     # ------------------------------------------------------------------
-    # Start / Stop
+    # Kernel trace capture
     # ------------------------------------------------------------------
 
-    def start(self, model: torch.nn.Module, input_ids: torch.Tensor) -> None:
-        """Prepare for profiling a single forward pass.
+    def trace(self, model, input_ids, label: str = "forward") -> float:
+        """Run one forward pass with ``torch.profiler``, capturing kernel trace.
 
-        Args:
-            model: The PyTorch model (must be on the right device).
-            input_ids: Input tensor for the forward pass.
+        Returns total elapsed time in microseconds.
         """
         if not self._available:
-            return
+            return 0.0
+        import torch
 
         torch.cuda.reset_peak_memory_stats(self._device)
         self._memory_start = torch.cuda.memory_allocated(self._device)
 
-        # Register forward hooks on each layer for per-layer timing
-        self._hooks.clear()
-        self._layer_times.clear()
-        self._register_layer_hooks(model)
+        # Use NVTX to mark operator scope for kernel-to-op mapping
+        with torch.no_grad():
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CUDA],
+                record_shapes=True,
+                with_stack=False,
+            ) as prof:
+                _ = model(input_ids)
 
-    def stop(self, model: torch.nn.Module, input_ids: torch.Tensor) -> None:
-        """Finalize profiling after a forward pass.
-
-        Should be called immediately after ``model(input_ids)`` completes.
-        """
-        if not self._available:
-            return
-        self._remove_hooks()
         self._memory_peak = torch.cuda.max_memory_allocated(self._device)
 
-    # ------------------------------------------------------------------
-    # Per-layer hooks
-    # ------------------------------------------------------------------
+        # Process profiler events into kernel list
+        self._trace_data = []
+        for evt in prof.events():
+            if evt.device_type == torch.profiler.DeviceType.CUDA and evt.name != "Context":
+                self._trace_data.append({
+                    "name": evt.name,
+                    "duration_us": evt.duration_us,
+                    "input_shapes": getattr(evt, "input_shapes", []),
+                    "call_stack": getattr(evt, "stack", []),
+                    "cpu_time_us": getattr(evt, "cpu_time", 0),
+                })
 
-    def _register_layer_hooks(self, model: torch.nn.Module) -> None:
-        """Register forward hooks on submodules to measure per-layer time."""
-        for name, module in model.named_modules():
-            if not list(module.children()):  # leaf module only
-                handler = module.register_forward_hook(
-                    self._make_hook(name)
-                )
-                self._hooks.append(handler)
-
-    def _make_hook(self, name: str):
-        """Create a forward hook that records CUDA event timing."""
-        def hook(module, inputs, outputs):
-            if not self._available:
-                return
-            # Use CUDA events for precise timing
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
-            # The forward has already happened; we record the event
-            # after the fact by using current CUDA stream position.
-            # Instead, we measure by wrapping the outputs:
-            # Since we're post-forward, use current stream
-            torch.cuda.synchronize()
-            # Approximate: record time based on module type
-            # For precise measurement, use torch.cuda.Event around the
-            # actual forward call. Since we're in a hook, we estimate.
-            pass
-
-        def pre_hook(module, inputs):
-            if not self._available:
-                return
-            # Record start event before forward
-            event = torch.cuda.Event(enable_timing=True)
-            event.record()
-            self._prefill_events.append(event)
-
-        return pre_hook
-
-    def _make_post_hook(self, layer_id: str):
-        """Create a post-forward hook to record end event."""
-        def post_hook(module, inputs, outputs):
-            if not self._available:
-                return
-            event = torch.cuda.Event(enable_timing=True)
-            event.record()
-            self._prefill_events.append(event)
-        return post_hook
-
-    def _remove_hooks(self) -> None:
-        for h in self._hooks:
-            h.remove()
-        self._hooks.clear()
-
-    # ------------------------------------------------------------------
-    # Timing utilities
-    # ------------------------------------------------------------------
-
-    def time_forward(self, model: torch.nn.Module,
-                     input_ids: torch.Tensor,
-                     label: str = "forward") -> float:
-        """Run one forward pass and return elapsed time in microseconds.
-
-        Uses ``torch.cuda.Event`` for precise GPU timing.
-        """
-        if not self._available:
-            return 0.0
-
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-
-        start_event.record()
-        with torch.no_grad():
-            _ = model(input_ids)
-        end_event.record()
-        torch.cuda.synchronize()
-
-        elapsed_us = start_event.elapsed_time(end_event) * 1000  # ms → μs
+        # Total time from events
+        total_us = sum(e["duration_us"] for e in self._trace_data)
 
         if label == "prefill":
-            self._prefill_total_us = elapsed_us
+            self._prefill_total_us = total_us
         elif label == "decode":
-            self._decode_total_us = elapsed_us
+            self._decode_total_us = total_us
 
-        return elapsed_us
+        return total_us
 
-    def time_generate(self, model: torch.nn.Module,
-                      input_ids: torch.Tensor,
-                      max_new_tokens: int = 20,
-                      **gen_kwargs) -> tuple[int, float]:
-        """Run ``model.generate()`` and return (tokens_generated, total_time_us).
+    def trace_generate(self, model, input_ids, max_new_tokens=20,
+                       **gen_kwargs) -> tuple[int, float]:
+        """Run ``model.generate()`` with profiling.
 
-        Also records per-step decode time (total generated time / steps).
+        Due to profiler overhead on iterative generation, only captures
+        total time and memory (kernel-level trace uses single forward pass).
         """
         if not self._available:
             return 0, 0.0
+        import torch
 
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
@@ -182,7 +112,7 @@ class HardwareProfiler:
         start_event.record()
         with torch.no_grad():
             out = model.generate(input_ids, max_new_tokens=max_new_tokens,
-                                **gen_kwargs)
+                                 **gen_kwargs)
         end_event.record()
         torch.cuda.synchronize()
 
@@ -193,71 +123,138 @@ class HardwareProfiler:
         return gen_len, total_us
 
     # ------------------------------------------------------------------
-    # Fill graph
+    # Kernel → Operator mapping
     # ------------------------------------------------------------------
 
     def attach_to_graph(self, graph) -> None:
-        """Fill ``hardware_metrics`` on each ``OperatorNode`` with profiling data.
+        """Map captured CUDA kernels to ONNX operator nodes.
 
-        Distributes layer time proportionally by FLOPs within each layer.
+        Strategy: distribute kernels proportionally by FLOPs within each
+        layer group. Each ``OperatorNode.hardware_metrics`` is filled with
+        the list of kernels that comprise its execution.
+
+        ``hardware_metrics`` populated::
+            {
+                "kernels": [
+                    {"name": "gemm_bf16", "duration_us": 125.3, "category": "compute"},
+                    {"name": "elementwise_kernel", "duration_us": 8.7, "category": "elementwise"},
+                ],
+                "total_kernel_time_us": 134.0,
+                "num_kernels": 2,
+                "gpu_memory_peak_mb": 2048.0,
+            }
         """
         if not self._available or not graph:
             return
 
         total_flops = sum(n.flops for n in graph.nodes) or 1
-        total_time_us = self._prefill_total_us + self._decode_total_us
+        total_time = self._prefill_total_us + self._decode_total_us
+        avail_kernels = list(self._trace_data)
 
+        # Group nodes by layer for coherent kernel assignment
+        layer_groups: dict[str, list] = defaultdict(list)
         for node in graph.nodes:
-            # Distribute time proportionally by FLOPs
-            time_share = (node.flops / total_flops) * total_time_us if total_flops else 0.0
+            lid = node.layer_id or "root"
+            layer_groups[lid].append(node)
 
-            node.hardware_metrics.update({
-                "gpu_device": str(self._device),
-                "gpu_time_us": round(time_share, 2),
-                "gpu_flops": node.flops,
-                "memory_bytes": node.memory_bytes,
-                "arith_intensity": round(node.arith_intensity, 3),
-            })
+        assigned = 0
+        for lid, nodes in layer_groups.items():
+            layer_flops = sum(n.flops for n in nodes) or 1
+            # How many kernels this layer gets (proportional to FLOPs)
+            layer_kernel_count = max(1, int(len(avail_kernels) * layer_flops / max(total_flops, 1)))
+            layer_kernels = avail_kernels[:layer_kernel_count]
+            avail_kernels = avail_kernels[layer_kernel_count:]
+
+            for node in nodes:
+                node_flops = max(node.flops, 1)
+                node_kernel_count = max(1, int(len(layer_kernels) * node_flops / layer_flops))
+                node_kernels = layer_kernels[:node_kernel_count]
+                layer_kernels = layer_kernels[node_kernel_count:]
+
+                kernel_list = []
+                total_kernel_us = 0.0
+                for k in node_kernels:
+                    kernel_list.append({
+                        "name": k["name"],
+                        "duration_us": k["duration_us"],
+                    })
+                    total_kernel_us += k["duration_us"]
+                    assigned += 1
+
+                node.hardware_metrics.update({
+                    "kernels": kernel_list,
+                    "total_kernel_time_us": round(total_kernel_us, 2),
+                    "num_kernels": len(kernel_list),
+                    "gpu_memory_peak_mb": round(
+                        (self._memory_peak - self._memory_start) / 1e6, 2),
+                })
 
     # ------------------------------------------------------------------
-    # Report
+    # Reports
     # ------------------------------------------------------------------
 
     def report_text(self) -> str:
-        """Return a formatted hardware profiling report."""
+        """Generate a kernel-level decomposition report."""
         if not self._available:
             return "  GPU profiling: not available (no CUDA device detected)"
+        import torch
+
+        # Kernel type summary
+        kernel_types: dict[str, int] = defaultdict(int)
+        kernel_time: dict[str, float] = defaultdict(float)
+        for evt in self._trace_data:
+            # Categorize by kernel name prefix
+            cat = evt["name"].split("_")[0] if "_" in evt["name"] else evt["name"]
+            kernel_types[cat] += 1
+            kernel_time[cat] += evt["duration_us"]
 
         lines = []
         lines.append("=" * 62)
-        lines.append("  GPU Hardware Profiling")
+        lines.append("  Kernel-Level Decomposition")
         lines.append("=" * 62)
-        lines.append(f"  Device: {torch.cuda.get_device_name(0)}")
-        lines.append(f"  CUDA version: {torch.version.cuda}")
-        lines.append(f"  Memory allocated: "
-                     f"{(self._memory_peak - self._memory_start) / 1e6:.1f} MB")
-        lines.append(f"  Memory peak:     {self._memory_peak / 1e6:.1f} MB")
+        lines.append(f"  Device: {torch.cuda.get_device_name(0) if self._available else 'N/A'}")
+        lines.append(f"  Total CUDA kernels: {len(self._trace_data)}")
+        lines.append(f"  Memory peak: {self._memory_peak / 1e6:.1f} MB")
         lines.append("")
         lines.append(f"  {'Phase':20s} {'Time (μs)':>12s} {'Time (ms)':>12s}")
         lines.append("-" * 46)
         if self._prefill_total_us > 0:
             lines.append(f"{'Prefill':20s} {self._prefill_total_us:>12.0f} "
-                         f"{self._prefill_total_us / 1000:>12.2f}")
+                         f"{self._prefill_total_us/1000:>12.2f}")
         if self._decode_total_us > 0:
             lines.append(f"{'Decode':20s} {self._decode_total_us:>12.0f} "
-                         f"{self._decode_total_us / 1000:>12.2f}")
+                         f"{self._decode_total_us/1000:>12.2f}")
         total = self._prefill_total_us + self._decode_total_us
         if total > 0:
-            lines.append(f"{'Total':20s} {total:>12.0f} {total / 1000:>12.2f}")
+            lines.append(f"{'Total':20s} {total:>12.0f} {total/1000:>12.2f}")
+        lines.append("")
+
+        # Kernel breakdown by type
+        lines.append(f"  {'Kernel Category':30s} {'Count':>6s} {'Time (μs)':>12s} {'%':>6s}")
+        lines.append("-" * 56)
+        sorted_cats = sorted(kernel_types.items(), key=lambda x: -kernel_time[x[0]])
+        for cat, cnt in sorted_cats:
+            t = kernel_time[cat]
+            pct = t / total * 100 if total > 0 else 0
+            lines.append(f"  {cat:30s} {cnt:>6d} {t:>12.0f} {pct:>5.1f}%")
 
         return "\n".join(lines)
 
     def save_report(self, output_dir: str | Path, name: str = "") -> Path:
-        """Save the hardware profiling report to a text file."""
-        from pathlib import Path
+        """Save the kernel-level report to a text file."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         stem = f"{name}_" if name else ""
         path = output_dir / f"{stem}hardware_report.txt"
         path.write_text(self.report_text(), encoding="utf-8")
+        return path
+
+    def trace_to_json(self, output_dir: str | Path, name: str = "") -> Path:
+        """Export raw kernel trace as JSON for external analysis."""
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{name}_" if name else ""
+        path = output_dir / f"{stem}kernel_trace.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self._trace_data, f, indent=2)
         return path

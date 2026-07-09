@@ -24,7 +24,7 @@ PROMPTS = [
 MAX_NEW_TOKENS = 20
 SKIP_GENERATION = False
 TRUST_REMOTE_CODE = True
-HARDWARE_PROFILING = False               # True = 用 CUDA Event 测量推理延迟(需 GPU)
+HARDWARE_PROFILING = True               # True = 用 CUDA Event 测量推理延迟(需 GPU)
 
 # ---- ONNX ----
 ONNX_PATH = "../Models/ONNXs/Kokoro-82M.onnx"
@@ -81,7 +81,7 @@ def run_pytorch_mode():
         # Step 1: Prefill
         print(f"  [Phase 1/3] Prefill")
         if HARDWARE_PROFILING and profiler.available:
-            _ = profiler.time_forward(model, prompt_ids, label="prefill")
+            _ = profiler.trace(model, prompt_ids, label="prefill")
         prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
         prefill_graph.prompt_text = prompt
         prefill_graph.prompt_tokens = seq_len
@@ -118,7 +118,7 @@ def run_pytorch_mode():
                     if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
                         kw[k] = v
                 if HARDWARE_PROFILING and profiler.available:
-                    gen_len, gen_time = profiler.time_generate(model, prompt_ids, **kw)
+                    gen_len, gen_time = profiler.trace_generate(model, prompt_ids, **kw)
                     out = None  # already generated inside time_generate
                     print(f"    generate time={gen_time/1000:.2f}ms")
                 else:
