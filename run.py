@@ -39,13 +39,12 @@ def ridge_point(hw: dict) -> float:
     return hw["peak_flops"] / hw["memory_bw"]
 
 
-def write_timestamp(label: str):
-    """Append HH:MM:SS.mmm to timestamp.txt in output dir."""
-    from pathlib import Path
+def write_timestamp(label: str, path="timestamps.txt"):
     from datetime import datetime
     now = datetime.now()
     ts = now.strftime("%H:%M:%S.") + f"{now.microsecond // 1000:03d}"
-    Path("timestamp.txt").open("a").write(f"{ts} {label}" + chr(10))
+    with open(path, "a") as f:
+        f.write(ts + " " + label + chr(10))
 
 
 
@@ -270,7 +269,6 @@ def run_pytorch_mode():
     with open(ts_path, "w") as tf:
         tf.write("start:" + _ts() + "\n")
     print(f"  start: {_ts()}")
-    write_timestamp("prefill_start")
     print(f"  Prompt: \"{prompt}\"")
     print(f"  tokens: {seq_len}")
 
@@ -317,7 +315,6 @@ def run_pytorch_mode():
         print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
         if gen_len == 0:
             print("    (no output - model may need different prompts)")
-            write_timestamp("decode_end")
         if HARDWARE_PROFILING and profiler.available:
             try:
                 _ = profiler.time_generate(model, prompt_ids, num_runs=PROFILING_RUNS, **kw)

@@ -37,30 +37,19 @@ def load_timestamps(path):
     ts = {}
     with open(path) as f:
         for line in f:
-            raw = line.strip()
-            if raw.startswith("start:") or "prefill_start" in raw or "inference_start" in raw:
-                ts["prefill_start"] = parse_ts_value(raw)
-            elif raw.startswith("end:") or "decode_end" in raw or "inference_end" in raw:
-                ts["decode_end"] = parse_ts_value(raw)
-            elif "prefill_end" in raw:
-                ts["prefill_end"] = parse_ts_value(raw)
-            elif "decode_start" in raw:
-                ts["decode_start"] = parse_ts_value(raw)
-    # If no prefill_end/decode_start, use same as start/end
-    if "prefill_end" not in ts and "prefill_start" in ts:
-        ts["prefill_end"] = ts.get("decode_end", ts["prefill_start"])
-    if "decode_start" not in ts:
-        ts["decode_start"] = ts.get("prefill_end", ts.get("prefill_start"))
+            for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end"):
+                if tag in line:
+                    ts[tag] = parse_ts_value(line)
     return ts
 
 
-def integrate(times, powers, t_start, t_end, gpu=None):
+def integrate(times, powers, t_start, t_end):
     mask = (times >= t_start) & (times <= t_end)
     if not mask.any():
         return 0.0, 0.0
-    pw = powers[mask][:, gpu] if gpu is not None else powers[mask].sum(axis=1)
-    energy = np.trapezoid(pw, times[mask])
-    return energy, float(pw.mean())
+    total_w = powers[mask].sum(axis=1)
+    energy = np.trapezoid(total_w, times[mask])
+    return energy, float(total_w.mean())
 
 
 def main():
@@ -80,25 +69,25 @@ def main():
     results = []
     for name, s, e in phases:
         if s in ts and e in ts:
-            e_j, w = integrate(times, powers, ts[s], ts[e], gpu=0)
+            e_j, w = integrate(times, powers, ts[s], ts[e])
             results.append((name, ts[e] - ts[s], e_j, w))
 
     if not results:
         print(f"[analyze] {args.timestamps}: timestamps not found")
         return
 
-    # Per-GPU average power (average across Prefill + Decode)
+    # Per-GPU average power (Prefill)
     t0 = ts.get("prefill_start")
-    t1 = ts.get("decode_end")
+    t1 = ts.get("prefill_end", ts.get("decode_end"))
     if t0 is not None and t1 is not None:
         avg = powers[(times >= t0) & (times <= t1)].mean(axis=0)
-        idle_avg = avg[1:].mean() if len(avg) > 1 else 0
-        gpu_vals = "  ".join([f"GPU{i}={avg[i]:.1f}W" for i in range(min(len(avg), 8))])
-        print(f"  Avg Power per GPU:  {gpu_vals}")
-        print(f"  GPU 0 (inference):  {avg[0]:.1f}W  |  GPU 1-7 (idle avg): {idle_avg:.1f}W")
+        print(f"  {'GPU':>5s}  {'Avg Power (W)':>14s}")
+        print(f"  {'-' * 22}")
+        for i in range(min(len(avg), 8)):
+            print(f"  {i:>5d}  {avg[i]:>10.2f}")
 
     # Phase summary
-    print(f"\n  {'Phase':15s}  {'Duration':>10s}  {'Energy(J)':>10s}  {'Avg Power(W)':>12s}")
+    print(f"\n  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
     print(f"  {'-' * 50}")
     for name, d, e, w in results:
         print(f"  {name:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
