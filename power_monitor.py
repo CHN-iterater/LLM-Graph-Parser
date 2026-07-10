@@ -63,7 +63,8 @@ def main():
     stop = Event()
     Thread(target=sample, args=(a.interval, a.max_samples, a.output, stop, a.use_smi),
            daemon=True).start()
-    print(f"[power] sampling ({a.interval}ms) -> {a.output}")
+    print(f"[power] sampling ({a.interval}ms) -> {a.output}", flush=True)
+    print("[power] Press Ctrl+C to stop", flush=True)
     try:
         while True:
             time.sleep(1)
