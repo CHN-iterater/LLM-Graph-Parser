@@ -113,7 +113,8 @@ def main():
                 e_j = e_j_total
             e_j /= runs
             if name == "Decode":
-                e_j /= gen_len  # 除以生成 token 数，得到单 token 结果
+                e_j /= gen_len
+                wall_s /= gen_len  # Duration 也除以 gen_len, 和 energy 对齐
             results.append((name, wall_s, e_j, w))
 
     if not results:
