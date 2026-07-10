@@ -17,6 +17,7 @@
 - [硬件 Profiling（可选）](#硬件-profiling可选)
 - [输出文件详解](#输出文件详解)
 - [扩展指南](#扩展指南)
+- [能耗重构（可选）](#能耗重构可选)
 - [运行测试](#运行测试)
 - [研究路线中的位置](#研究路线中的位置)
 - [项目结构](#项目结构)
@@ -242,6 +243,46 @@ from llm_graph_parser.hardware import HardwareProfile
 h100 = HardwareProfile(name="H100-SXM", peak_flops_fp16=1979e12,
                        memory_bandwidth=3350e9, memory_size=80e9, tdp=700)
 ```
+
+---
+
+## 能耗重构（可选）
+
+将单算子 benchmark 能耗映射回计算图 DAG，重构推理总能耗。详见 [LLM_Graph_Parser.md](LLM_Graph_Parser.md) 第十章。
+
+### 方向 1: 算子级重构
+
+```bash
+python energy_consumption_refactor.py \
+    -c single_operator_summary.csv \
+    -g output/ModelName_timestamp/graph.json \
+    --gen-len 20
+```
+
+### 方向 2: GPU 功耗采集
+
+终端 1 — 启动功耗采样：
+```bash
+python power_monitor.py -i 100 -o power.txt
+```
+
+终端 2 — 运行推理（会被方向 1 自动调用）：
+```bash
+python run.py
+```
+
+分析结果：
+```bash
+python power_analyze.py -t timestamps.txt -p power.txt -n 20
+```
+
+### 相关脚本
+
+| 脚本 | 用途 | 位置 |
+|------|------|------|
+| `energy_consumption_refactor.py` | 方向 1: 算子能耗重构 | 项目根目录 |
+| `power_monitor.py` | 方向 2: GPU 功耗采样 | `LLM_Graph_Parser/` |
+| `power_analyze.py` | 方向 2: 功耗分析 | `LLM_Graph_Parser/` |
 
 ---
 
