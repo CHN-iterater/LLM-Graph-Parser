@@ -326,6 +326,10 @@ def run_pytorch_mode():
                 _ = profiler.time_generate(model, prompt_ids, num_runs=PROFILING_RUNS, **kw)
             except Exception as pe:
                 print(f"    [profiler] trace failed: {pe}")
+        total_dc_gpu_us = profiler._decode_total_us * PROFILING_RUNS
+        with open(ts_path, "a") as tf:
+            tf.write(f"decode_gpu_us {int(total_dc_gpu_us)}\n")
+        write_timestamp("gen_end", ts_path)
 
     # ---- Layer partitioner ----
     for g in (prefill_graph, decode_graph):

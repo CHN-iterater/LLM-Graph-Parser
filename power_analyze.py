@@ -50,7 +50,7 @@ def load_timestamps(path):
     with open(path) as f:
         for line in f:
             # 普通时间戳
-            for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end", "gen_start", "end"):
+            for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end", "gen_start", "gen_end", "end"):
                 if tag in line:
                     ts[tag] = parse_ts_value(line)
             # GPU 执行时间（μs），格式: "prefill_gpu_us 12345"
@@ -94,7 +94,7 @@ def main():
 
     phases = [
         ("Prefill", "prefill_start", "prefill_end", "prefill_gpu_us"),
-        ("Decode", "decode_start", "decode_end", "decode_gpu_us"),
+        ("Decode", "gen_start", "gen_end", "decode_gpu_us"),
     ]
     results = []
     for name, s, e, gpu_tag in phases:
