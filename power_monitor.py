@@ -5,7 +5,7 @@ GPU 功耗采集 — pynvml 或 nvidia-smi 采样 8 张 H100 实时功率。
     python power_monitor.py
     python power_monitor.py -i 50 --use-smi
 """
-import argparse, subprocess, datetime
+import argparse, subprocess, datetime, time
 from threading import Thread, Event
 
 
