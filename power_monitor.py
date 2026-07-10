@@ -66,7 +66,7 @@ def main():
     print(f"[power] sampling ({a.interval}ms) -> {a.output}")
     try:
         while True:
-            Thread._sleep(1)
+            time.sleep(1)
     except KeyboardInterrupt:
         stop.set()
     print(f"\n[power] saved to {a.output}")
