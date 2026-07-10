@@ -1,5 +1,7 @@
 """
 GPU 功耗分析 — python power_analyze.py -t timestamps.txt -p power.txt [-n 20]
+
+自动扣除基准功耗：GPU 0 推理，其余 GPU 空载时取其平均功率作为基准。
 """
 import argparse
 import numpy as np
@@ -53,13 +55,13 @@ def load_timestamps(path):
     return ts
 
 
-def integrate(times, powers, t_start, t_end):
+def integrate(times, power_1d, t_start, t_end):
+    """对一维功率序列在 [t_start, t_end] 上积分求能量。"""
     mask = (times >= t_start) & (times <= t_end)
     if not mask.any():
         return 0.0, 0.0
-    total_w = powers[mask].sum(axis=1)
-    energy = np.trapezoid(total_w, times[mask])
-    return energy, float(total_w.mean())
+    energy = np.trapezoid(power_1d[mask], times[mask])
+    return energy, float(power_1d[mask].mean())
 
 
 def main():
@@ -75,6 +77,16 @@ def main():
     n_gpu = powers.shape[1] if powers.ndim > 1 else 0
     runs = max(args.runs, 1)
 
+    # ---- 基准功耗扣除（GPU 0 推理，GPU 1~N-1 空载）----
+    if n_gpu >= 2:
+        baseline = powers[:, 1:].mean(axis=1)  # 每时刻 idle GPU 平均功率
+        inference_w = powers[:, 0] - baseline   # GPU 0 净推理功率
+        avg_baseline = float(baseline.mean())
+    else:
+        baseline = np.zeros(len(times))
+        inference_w = powers[:, 0] if powers.ndim > 1 else powers
+        avg_baseline = 0.0
+
     phases = [
         ("Prefill", "prefill_start", "prefill_end"),
         ("Decode", "decode_start", "decode_end"),
@@ -83,7 +95,7 @@ def main():
     results = []
     for name, s, e in phases:
         if s in ts and e in ts:
-            e_j, w = integrate(times, powers, ts[s], ts[e])
+            e_j, w = integrate(times, inference_w, ts[s], ts[e])
             e_j /= runs  # 除以重复次数，得到单次推理的能耗
             results.append((name, ts[e] - ts[s], e_j, w))
 
@@ -91,7 +103,7 @@ def main():
         print(f"[analyze] {args.timestamps}: timestamps not found")
         return
 
-    # Per-GPU average power (Prefill)
+    # Per-GPU average power + 基准功耗
     t0 = ts.get("prefill_start")
     t1 = ts.get("prefill_end", ts.get("decode_end"))
     if t0 is not None and t1 is not None:
@@ -100,6 +112,9 @@ def main():
         print(f"  {'-' * 22}")
         for i in range(min(len(avg), 8)):
             print(f"  {i:>5d}  {avg[i]:>10.2f}")
+        if n_gpu >= 2:
+            print(f"\n  Baseline (idle GPU 1~{n_gpu-1} avg): {avg_baseline:.2f} W")
+            print(f"  Inference-only (GPU 0 - baseline): {avg[0] - avg_baseline:.2f} W")
 
     # Phase summary (per-run)
     print(f"\n  (除以 {runs} 次 profiling runs，以下为单次推理结果)")
