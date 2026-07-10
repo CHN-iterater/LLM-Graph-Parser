@@ -20,7 +20,7 @@ MAX_NEW_TOKENS = 20
 SKIP_GENERATION = False
 TRUST_REMOTE_CODE = True
 HARDWARE_PROFILING = True
-PROFILING_RUNS = 1
+PROFILING_RUNS = 20
 ONNX_PATH = "../Models/ONNXs/Kokoro-82M.onnx"
 HARDWARE = {"peak_flops": 1979e12, "memory_bw": 3350e9}
 
@@ -85,9 +85,6 @@ def _summary_extra(graph, combined, decode_graph, gen_len, pf_ai, profiler=None)
     bound = "COMPUTE BOUND" if pf_ai >= ridge else "MEMORY BOUND"
     lines.append(f"Roofline:    Prefill AI={pf_ai:.2f}, {bound} (vs H100)")
 
-    lines.append("")
-    lines.append("Operator counts:")
-
     # Hardware profiling info
     if profiler and profiler.available:
         pf_t = profiler._prefill_total_us / 1000
@@ -105,8 +102,46 @@ def _summary_extra(graph, combined, decode_graph, gen_len, pf_ai, profiler=None)
         if gen_len > 0 and dc_t > 0:
             lines.append(f"    Throughput: {gen_len/(dc_t/1000):.1f} tokens/s")
 
-    for op, cnt in sorted(combined.get_operator_counts().items(), key=lambda x: -x[1]):
-        lines.append(f"  {op:25s}: {cnt}")
+    # 15-type classification
+    counts = combined.get_operator_counts()
+    types: dict[int, int] = {}
+    aux: dict[str, int] = {}
+    for op, cnt in counts.items():
+        node = combined._nodes.get(list(combined._nodes.keys())[0]) if combined._nodes else None
+        # Find any node of this type to get its category
+        cat = "other"
+        for n in combined._nodes.values():
+            if n.op_type == op:
+                cat = n.category; break
+        tid, tname = classify_15(op, cat)
+        if tid > 0:
+            types.setdefault(tid, 0)
+            types[tid] += cnt
+        else:
+            aux[op] = cnt
+
+    lines.append("")
+    lines.append(f"  {'ID':>4s}  {'Type':30s}  {'Count':>8s}  {'Energy Class':>18s}")
+    lines.append("  " + "-" * 66)
+    for tid in sorted(types):
+        tname = {1:"GEMM",2:"FlashAttention",3:"BMM",4:"Softmax",5:"LayerNorm",
+                 6:"RMSNorm",7:"Reduction",8:"GELU",9:"SiLU/Swish",10:"ReLU",
+                 11:"KV Cache",12:"KV Cache Write",13:"AllReduce",14:"AllGather",15:"Memcpy D2D"}.get(tid, f"Type-{tid}")
+        eclass = {1:"compute_bound",2:"compute_bound",3:"compute_bound",
+                  4:"memory_bound",5:"memory_bound",6:"memory_bound",7:"memory_bound",
+                  8:"activation",9:"activation",10:"activation",
+                  11:"data_movement",12:"data_movement",13:"communication",14:"communication",15:"data_movement"}.get(tid, "")
+        lines.append(f"  #{tid:2d}  {tname:30s}  {types[tid]:>8d}  {eclass:>18s}")
+
+    if aux:
+        lines.append("  " + "-" * 66)
+        lines.append(f"  {'--':>4s}  {'Auxiliary operators':30s}  {sum(aux.values()):>8d}")
+    total_main = sum(types.values())
+    total_aux = sum(aux.values())
+    lines.append(f"  {'--':>4s}  {'---':30s}  {'---':>8s}")
+    lines.append(f"  {'Main':>4s}  {'(types 1-15)':30s}  {total_main:>8d}")
+    lines.append(f"  {'Aux':>4s}  {'(assist ops)':30s}  {total_aux:>8d}")
+
     return lines
 
 

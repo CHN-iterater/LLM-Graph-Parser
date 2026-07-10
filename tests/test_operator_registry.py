@@ -13,12 +13,12 @@ class TestOperatorRegistry:
     def test_lookup_known_linear(self, registry):
         spec = registry.lookup("linear")
         assert spec.name == "LINEAR"
-        assert spec.category == "compute"
+        assert spec.category == "compute_bound"
 
     def test_lookup_known_softmax(self, registry):
         spec = registry.lookup("softmax")
         assert spec.name == "SOFTMAX"
-        assert spec.category == "activation"
+        assert spec.category == "memory_bound"
 
     def test_lookup_known_aten_format(self, registry):
         spec = registry.lookup("torch.ops.aten.addmm.default")
