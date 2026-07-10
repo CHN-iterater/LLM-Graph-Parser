@@ -266,13 +266,12 @@ def run_pytorch_mode():
     prefix = ""
 
     print(f"\n{'=' * 60}")
-    with open(ts_path, "w") as tf:
-        tf.write("start:" + _ts() + "\n")
-    print(f"  start: {_ts()}")
+    write_timestamp("start", ts_path)
     print(f"  Prompt: \"{prompt}\"")
     print(f"  tokens: {seq_len}")
 
     # Step 1: Prefill
+    write_timestamp("prefill_start", ts_path)
     print(f"  [Phase 1/3] Prefill")
     if HARDWARE_PROFILING and profiler.available:
         _ = profiler.time_forward(model, prompt_ids, label="prefill", num_runs=PROFILING_RUNS)
@@ -284,8 +283,10 @@ def run_pytorch_mode():
     print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
     if HARDWARE_PROFILING and profiler.available:
         print(f"    time={profiler._prefill_total_us/1000:.2f}ms")
+    write_timestamp("prefill_end", ts_path)
 
     # Step 2: Decode
+    write_timestamp("decode_start", ts_path)
     print(f"  [Phase 2/3] Decode (1 token)")
     decode_token = prompt_ids[:, -1:]
     decode_graph = parse_model(model, decode_token, model_name=model_label, onnx_path="")
@@ -294,12 +295,14 @@ def run_pytorch_mode():
     dc = decode_graph.get_stage_stats("decode")
     dc_flops_per = dc["total_flops"]
     print(f"    per-step: ops={dc['num_ops']}, FLOPs={dc_flops_per/1e6:.2f}M, AI={dc['arith_intensity']:.2f}")
+    write_timestamp("decode_end", ts_path)
 
     # Step 3: Generation
     if SKIP_GENERATION:
         gen_len, answer = 0, ""
         print(f"  [Phase 3/3] Skipped (SKIP_GENERATION=True)")
     else:
+        write_timestamp("gen_start", ts_path)
         print(f"  [Phase 3/3] Generating (max {MAX_NEW_TOKENS})...")
         with torch.no_grad():
             kw = dict(max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
@@ -367,9 +370,7 @@ def run_pytorch_mode():
     print("\n" + "=" * 60)
     print(text)
     print("=" * 60)
-    with open(ts_path, "a") as tf:
-        tf.write("end:" + _ts() + "\n")
-    print(f"  end:   {_ts()}")
+    write_timestamp("end", ts_path)
     print(f"\n所有结果已保存到: {output_dir}/")
 
 

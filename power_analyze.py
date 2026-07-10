@@ -7,13 +7,21 @@ import numpy as np
 
 def parse_ts_value(line):
     raw = line.strip()
-    if ":" in raw[:6]:
-        _, ts = raw.split(":", 1)
-        ts = ts.strip()
+    parts = raw.split(None, 1)  # 最多拆成 2 段
+    if len(parts) == 2:
+        a, b = parts
+        # 判断哪一段像是时间戳 (HH:MM:SS.mmm → 第 2、5 字符是 ':')
+        if len(a) >= 8 and a[2] == ":" and a[5] == ":":
+            ts_str = a  # 新格式: "09:15:23.456 start"
+        elif len(b) >= 8 and b[2] == ":" and b[5] == ":":
+            ts_str = b  # 旧格式: "start:09:15:23.456"
+        else:
+            ts_str = a
     else:
-        ts = raw.split()[0]
-    h, m = int(ts[0:2]), int(ts[3:5])
-    s, ms = ts[6:8], ts[9:12]
+        # 无空格 → 旧格式 "start:09:15:23.456"
+        _, ts_str = raw.split(":", 1)
+    h, m = int(ts_str[0:2]), int(ts_str[3:5])
+    s, ms = ts_str[6:8], ts_str[9:12]
     return h * 3600 + m * 60 + int(s) + int(ms) / 1000
 
 
@@ -37,7 +45,7 @@ def load_timestamps(path):
     ts = {}
     with open(path) as f:
         for line in f:
-            for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end"):
+            for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end", "gen_start", "end"):
                 if tag in line:
                     ts[tag] = parse_ts_value(line)
     return ts
@@ -65,6 +73,7 @@ def main():
     phases = [
         ("Prefill", "prefill_start", "prefill_end"),
         ("Decode", "decode_start", "decode_end"),
+        ("Generation", "gen_start", "end"),
     ]
     results = []
     for name, s, e in phases:
