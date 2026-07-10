@@ -99,9 +99,16 @@ def main():
     results = []
     for name, s, e, gpu_tag in phases:
         if s in ts and e in ts:
-            e_j, w = integrate(times, inference_w, ts[s], ts[e])
+            e_j_total, w = integrate(times, inference_w, ts[s], ts[e])
+            wall_s = ts[e] - ts[s]
+            if gpu_tag in ts:
+                gpu_s = ts[gpu_tag] / 1e6
+                ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
+                e_j = e_j_total * ratio  # 按 GPU 活跃时间比例折算算子能耗
+            else:
+                e_j = e_j_total
             e_j /= runs
-            results.append((name, ts[e] - ts[s], e_j, w))
+            results.append((name, wall_s, e_j, w))
 
     if not results:
         print(f"[analyze] {args.timestamps}: timestamps not found")
@@ -126,20 +133,20 @@ def main():
     print(f"  {'-' * 50}")
     for name, d, e, w in results:
         print(f"  {name:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
-    # 框架开销明细（仅展示，不参与能耗计算）
+    # 算子 vs 框架开销分解
     has_gpu_data = any(t in ts for t in ("prefill_gpu_us", "decode_gpu_us"))
     if has_gpu_data and n_gpu >= 2:
-        print(f"\n  [交叉验证] 方向1 算子能耗 vs 方向2 pynvml 实测")
+        print(f"\n  [算子 vs 框架开销分解] (按 GPU busy/wall 比例折算)")
         for name, s, e, gpu_tag in phases:
             if s in ts and e in ts and gpu_tag in ts:
                 total_ej, _ = integrate(times, inference_w, ts[s], ts[e])
                 gpu_s = ts[gpu_tag] / 1e6
                 wall_s = ts[e] - ts[s]
-                avg_w = total_ej / wall_s if wall_s > 0 else 0
-                print(f"  {name:15s}  operator={total_ej/runs:.2f}J  (pynvml net)"
-                      f"  |  wall={wall_s*1000:.0f}ms"
-                      f"  GPU_busy={gpu_s*1000:.0f}ms"
-                      f"  avg_net_power={avg_w:.0f}W")
+                ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
+                op = total_ej * ratio / runs
+                fw = total_ej * (1 - ratio) / runs
+                print(f"  {name:15s}  operator={op:.2f}J  framework={fw:.2f}J  total={total_ej/runs:.2f}J")
+                print(f"  {'':15s}  GPU busy={gpu_s*1000:.0f}/{wall_s*1000:.0f}ms ({ratio*100:.1f}%)")
 
     if len(results) >= 2:
         td = sum(r[1] for r in results)
