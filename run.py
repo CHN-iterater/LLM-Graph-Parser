@@ -39,6 +39,67 @@ def ridge_point(hw: dict) -> float:
     return hw["peak_flops"] / hw["memory_bw"]
 
 
+
+TYPE_15_NAME = {
+    1: "GEMM", 2: "FlashAttention", 3: "BMM",
+    4: "Softmax", 5: "LayerNorm", 6: "RMSNorm", 7: "Reduction",
+    8: "GELU", 9: "SiLU/Swish", 10: "ReLU",
+    11: "KV Cache Read", 12: "KV Cache Write",
+    13: "AllReduce", 14: "AllGather", 15: "Memcpy D2D",
+}
+TYPE_15_CLASS = {
+    1: "compute_bound", 2: "compute_bound", 3: "compute_bound",
+    4: "memory_bound", 5: "memory_bound", 6: "memory_bound", 7: "memory_bound",
+    8: "activation", 9: "activation", 10: "activation",
+    11: "data_movement", 12: "data_movement",
+    13: "communication", 14: "communication", 15: "data_movement",
+}
+_KCACHE_PATTERNS = (b"attention", b"attn", b"qkv")
+_NCCL_PATTERNS = (b"nccl", b"allreduce", b"allgather", b"broadcast")
+_MEMCPY_PATTERNS = (b"memcpy", b"d2d", b"dtoD")
+
+
+def classify_15(op_type: str, category: str) -> tuple[int, str]:
+    t = op_type.upper()
+    if category == "compute_bound":
+        if "ATTENTION" in t or "FLASH" in t:
+            return 2, TYPE_15_NAME[2]
+        if t == "BMM":
+            return 3, TYPE_15_NAME[3]
+        return 1, TYPE_15_NAME[1]
+    if category == "memory_bound":
+        if "SOFTMAX" in t:
+            return 4, TYPE_15_NAME[4]
+        if "RMS" in t:
+            return 6, TYPE_15_NAME[6]
+        if "NORM" in t:
+            return 5, TYPE_15_NAME[5]
+        return 7, TYPE_15_NAME[7]
+    if category == "activation":
+        if t in ("GELU",):
+            return 8, TYPE_15_NAME[8]
+        if t in ("SILU", "SIGMOID"):
+            return 9, TYPE_15_NAME[9]
+        if t in ("RELU",):
+            return 10, TYPE_15_NAME[10]
+        return 8, TYPE_15_NAME[8]
+    return 0, "Auxiliary"
+
+
+def classify_profiler_kernel(kernel_name: str) -> tuple[int, str]:
+    kn = kernel_name.encode() if isinstance(kernel_name, str) else kernel_name
+    if any(p in kn for p in _MEMCPY_PATTERNS):
+        return 15, TYPE_15_NAME[15]
+    if any(p in kn for p in _NCCL_PATTERNS):
+        if b"allreduce" in kn:
+            return 13, TYPE_15_NAME[13]
+        return 14, TYPE_15_NAME[14]
+    if any(p in kn for p in _KCACHE_PATTERNS):
+        return 11, TYPE_15_NAME[11]
+    return 0, "Auxiliary"
+
+
+
 def _summary_header(model_label, prompt, answer, seq_len, gen_len, pf, dc, dc_total):
     """管线统计表头 + Prefill/Decode 数据行。"""
     pf_flops = pf["total_flops"]
