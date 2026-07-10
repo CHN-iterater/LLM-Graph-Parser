@@ -76,18 +76,16 @@ def main():
         print(f"[analyze] {args.timestamps}: timestamps not found")
         return
 
-    # Per-GPU average power (Prefill)
+    # Per-GPU average power (average across Prefill + Decode)
     t0 = ts.get("prefill_start")
-    t1 = ts.get("prefill_end", ts.get("decode_end"))
+    t1 = ts.get("decode_end")
     if t0 is not None and t1 is not None:
         avg = powers[(times >= t0) & (times <= t1)].mean(axis=0)
-        print(f"  {'GPU':>5s}  {'Avg Power (W)':>14s}")
-        print(f"  {'-' * 22}")
-        for i in range(min(len(avg), 8)):
-            print(f"  {i:>5d}  {avg[i]:>10.2f}")
+        gpu_vals = "  ".join([f"GPU{i}={avg[i]:.1f}W" for i in range(min(len(avg), 8))])
+        print(f"  Avg Power per GPU:  {gpu_vals}")
 
     # Phase summary
-    print(f"\n  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
+    print(f"\n  {'Phase':15s}  {'Duration':>10s}  {'Energy(J)':>10s}  {'Avg Power(W)':>12s}")
     print(f"  {'-' * 50}")
     for name, d, e, w in results:
         print(f"  {name:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
