@@ -33,8 +33,9 @@ class HardwareProfiler:
     # Timing (CUDA Event)
     # ------------------------------------------------------------------
 
-    def time_forward(self, model, input_ids, label: str = "forward") -> float:
-        """Run one forward pass, return elapsed time in microseconds."""
+    def time_forward(self, model, input_ids, label: str = "forward",
+                     num_runs: int = 1) -> float:
+        """Run forward pass(es), return avg elapsed time in us."""
         if not self._available:
             return 0.0
         import torch
@@ -46,12 +47,13 @@ class HardwareProfiler:
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         with torch.no_grad():
-            _ = model(input_ids)
+            for _ in range(num_runs):
+                _ = model(input_ids)
         end.record()
         torch.cuda.synchronize()
 
         self._memory_peak = torch.cuda.max_memory_allocated(self._device)
-        us = start.elapsed_time(end) * 1000
+        us = start.elapsed_time(end) * 1000 // num_runs
 
         if label == "prefill":
             self._prefill_total_us = us
@@ -60,8 +62,9 @@ class HardwareProfiler:
         return us
 
     def time_generate(self, model, input_ids, max_new_tokens=20,
+                      num_runs: int = 1,
                       **gen_kwargs) -> tuple[int, float]:
-        """Run ``model.generate()``, return (tokens, total_time_us)."""
+        """Run generate (num_runs times), return (tokens, avg time us)."""
         if not self._available:
             return 0, 0.0
         import torch
@@ -73,13 +76,14 @@ class HardwareProfiler:
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         with torch.no_grad():
-            out = model.generate(input_ids, max_new_tokens=max_new_tokens,
-                                **gen_kwargs)
+            for _ in range(num_runs):
+                out = model.generate(input_ids, max_new_tokens=max_new_tokens,
+                                    **gen_kwargs)
         end.record()
         torch.cuda.synchronize()
 
         self._memory_peak = torch.cuda.max_memory_allocated(self._device)
-        us = start.elapsed_time(end) * 1000
+        us = start.elapsed_time(end) * 1000 // num_runs
         self._decode_total_us = us
         return out.shape[1] - input_ids.shape[1], us
 

@@ -20,6 +20,7 @@ MAX_NEW_TOKENS = 20
 SKIP_GENERATION = False
 TRUST_REMOTE_CODE = True
 HARDWARE_PROFILING = True
+PROFILING_RUNS = 1
 ONNX_PATH = "../Models/ONNXs/Kokoro-82M.onnx"
 HARDWARE = {"peak_flops": 1979e12, "memory_bw": 3350e9}
 
@@ -112,6 +113,9 @@ def _summary_extra(graph, combined, decode_graph, gen_len, pf_ai, profiler=None)
 # ====================================================================
 # PyTorch 模式
 # ====================================================================
+def _ts():
+    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
 def run_pytorch_mode():
     from transformers import AutoModelForCausalLM, AutoTokenizer
     import torch
@@ -119,6 +123,7 @@ def run_pytorch_mode():
 
     model_label = os.path.basename(MODEL_SOURCE.replace("\\", "/"))
     output_dir = make_output_dir(model_label)
+    ts_path = os.path.join(output_dir, "timestamps.txt")
 
     print(f"\n加载模型: {MODEL_SOURCE}")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE)
@@ -156,13 +161,16 @@ def run_pytorch_mode():
     prefix = ""
 
     print(f"\n{'=' * 60}")
+    with open(ts_path, "w") as tf:
+        tf.write("start:" + _ts() + "\n")
+    print(f"  start: {_ts()}")
     print(f"  Prompt: \"{prompt}\"")
     print(f"  tokens: {seq_len}")
 
     # Step 1: Prefill
     print(f"  [Phase 1/3] Prefill")
     if HARDWARE_PROFILING and profiler.available:
-        _ = profiler.time_forward(model, prompt_ids, label="prefill")
+        _ = profiler.time_forward(model, prompt_ids, label="prefill", num_runs=PROFILING_RUNS)
     prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
     prefill_graph.prompt_text = prompt
     prefill_graph.prompt_tokens = seq_len
@@ -204,7 +212,7 @@ def run_pytorch_mode():
             print("    (no output - model may need different prompts)")
         if HARDWARE_PROFILING and profiler.available:
             try:
-                _ = profiler.time_generate(model, prompt_ids, **kw)
+                _ = profiler.time_generate(model, prompt_ids, num_runs=PROFILING_RUNS, **kw)
             except Exception as pe:
                 print(f"    [profiler] trace failed: {pe}")
 
@@ -254,7 +262,8 @@ def run_pytorch_mode():
     print("\n" + "=" * 60)
     print(text)
     print("=" * 60)
-
+    tf.write("end:" + _ts() + "\n")
+    print(f"  end:   {_ts()}")
     print(f"\n所有结果已保存到: {output_dir}/")
 
 
@@ -268,6 +277,7 @@ def run_onnx_mode():
     if model_label.lower().endswith(".onnx"):
         model_label = model_label[:-5]
     output_dir = make_output_dir(model_label)
+    ts_path = os.path.join(output_dir, "timestamps.txt")
 
     print(f"\n加载 ONNX: {ONNX_PATH}")
     graph = parse_onnx(ONNX_PATH, model_name=model_label)
