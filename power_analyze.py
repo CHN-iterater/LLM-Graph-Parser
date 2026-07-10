@@ -37,9 +37,20 @@ def load_timestamps(path):
     ts = {}
     with open(path) as f:
         for line in f:
-            for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end"):
-                if tag in line:
-                    ts[tag] = parse_ts_value(line)
+            raw = line.strip()
+            if raw.startswith("start:") or "prefill_start" in raw or "inference_start" in raw:
+                ts["prefill_start"] = parse_ts_value(raw)
+            elif raw.startswith("end:") or "decode_end" in raw or "inference_end" in raw:
+                ts["decode_end"] = parse_ts_value(raw)
+            elif "prefill_end" in raw:
+                ts["prefill_end"] = parse_ts_value(raw)
+            elif "decode_start" in raw:
+                ts["decode_start"] = parse_ts_value(raw)
+    # If no prefill_end/decode_start, use same as start/end
+    if "prefill_end" not in ts and "prefill_start" in ts:
+        ts["prefill_end"] = ts.get("decode_end", ts["prefill_start"])
+    if "decode_start" not in ts:
+        ts["decode_start"] = ts.get("prefill_end", ts.get("prefill_start"))
     return ts
 
 
