@@ -25,14 +25,27 @@ def load_power(path):
     return np.array(times), np.array(powers)
 
 
+def parse_ts_value(line):
+    """Parse 'start:HH:MM:SS.mmm' or 'HH:MM:SS.mmm label' → seconds."""
+    raw = line.strip()
+    # Format: start:HH:MM:SS.mmm
+    if raw.startswith("start:") or raw.startswith("end:"):
+        ts = raw.split(":", 1)[1]
+    else:
+        ts = raw.split()[0]
+    h, m = int(ts[0:2]), int(ts[3:5])
+    s, ms = ts[6:8], ts[9:12]
+    return h * 3600 + m * 60 + int(s) + int(ms) / 1000
+
+
 def load_timestamps(path):
     start = end = None
     with open(path) as f:
         for line in f:
-            if "inference_start" in line:
-                start = parse_hhmmss(line)
-            elif "inference_end" in line:
-                end = parse_hhmmss(line)
+            if line.startswith("start:") or "inference_start" in line:
+                start = parse_ts_value(line)
+            elif line.startswith("end:") or "inference_end" in line:
+                end = parse_ts_value(line)
     return start, end
 
 
