@@ -43,13 +43,13 @@ def load_timestamps(path):
     return ts
 
 
-def integrate(times, powers, t_start, t_end):
+def integrate(times, powers, t_start, t_end, gpu=None):
     mask = (times >= t_start) & (times <= t_end)
     if not mask.any():
         return 0.0, 0.0
-    total_w = powers[mask].sum(axis=1)
-    energy = np.trapezoid(total_w, times[mask])
-    return energy, float(total_w.mean())
+    pw = powers[mask][:, gpu] if gpu is not None else powers[mask].sum(axis=1)
+    energy = np.trapezoid(pw, times[mask])
+    return energy, float(pw.mean())
 
 
 def main():
@@ -69,7 +69,7 @@ def main():
     results = []
     for name, s, e in phases:
         if s in ts and e in ts:
-            e_j, w = integrate(times, powers, ts[s], ts[e])
+            e_j, w = integrate(times, powers, ts[s], ts[e], gpu=0)
             results.append((name, ts[e] - ts[s], e_j, w))
 
     if not results:
@@ -81,8 +81,10 @@ def main():
     t1 = ts.get("decode_end")
     if t0 is not None and t1 is not None:
         avg = powers[(times >= t0) & (times <= t1)].mean(axis=0)
+        idle_avg = avg[1:].mean() if len(avg) > 1 else 0
         gpu_vals = "  ".join([f"GPU{i}={avg[i]:.1f}W" for i in range(min(len(avg), 8))])
         print(f"  Avg Power per GPU:  {gpu_vals}")
+        print(f"  GPU 0 (inference):  {avg[0]:.1f}W  |  GPU 1-7 (idle avg): {idle_avg:.1f}W")
 
     # Phase summary
     print(f"\n  {'Phase':15s}  {'Duration':>10s}  {'Energy(J)':>10s}  {'Avg Power(W)':>12s}")
