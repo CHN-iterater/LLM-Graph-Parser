@@ -1,7 +1,8 @@
 """
-GPU 功耗分析 — python power_analyze.py -t timestamps.txt -p power.txt [-n 20]
+GPU 功耗分析 — python power_analyze.py -t timestamps.txt -p power.txt [-n 20] [--gen-len 20]
 
 自动扣除基准功耗：GPU 0 推理，其余 GPU 空载时取其平均功率作为基准。
+decode 能耗除以 --gen-len 得到单 token 结果。
 """
 import argparse
 import numpy as np
@@ -75,12 +76,15 @@ def main():
     parser.add_argument("-p", "--power", default="power.txt")
     parser.add_argument("-n", "--runs", type=int, default=DEFAULT_RUNS,
                         help=f"profiling 重复次数，能耗除以该值得到单次结果（默认 {DEFAULT_RUNS}）")
+    parser.add_argument("--gen-len", type=int, default=1,
+                        help="生成 token 数，decode 能耗除以该值得到单 token 结果（默认 1）")
     args = parser.parse_args()
 
     times, powers = load_power(args.power)
     ts = load_timestamps(args.timestamps)
     n_gpu = powers.shape[1] if powers.ndim > 1 else 0
     runs = max(args.runs, 1)
+    gen_len = max(args.gen_len, 1)
 
     # ---- 基准功耗扣除（GPU 0 推理，GPU 1~N-1 空载）----
     if n_gpu >= 2:
@@ -108,6 +112,8 @@ def main():
             else:
                 e_j = e_j_total
             e_j /= runs
+            if name == "Decode":
+                e_j /= gen_len  # 除以生成 token 数，得到单 token 结果
             results.append((name, wall_s, e_j, w))
 
     if not results:
@@ -132,7 +138,8 @@ def main():
     print(f"  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
     print(f"  {'-' * 50}")
     for name, d, e, w in results:
-        print(f"  {name:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
+        label = f"{name} (per token)" if (name == "Decode" and gen_len > 1) else name
+        print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
     # 算子 vs 框架开销分解
     has_gpu_data = any(t in ts for t in ("prefill_gpu_us", "decode_gpu_us"))
     if has_gpu_data and n_gpu >= 2:
@@ -143,9 +150,11 @@ def main():
                 gpu_s = ts[gpu_tag] / 1e6
                 wall_s = ts[e] - ts[s]
                 ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
-                op = total_ej * ratio / runs
-                fw = total_ej * (1 - ratio) / runs
-                print(f"  {name:15s}  operator={op:.2f}J  framework={fw:.2f}J  total={total_ej/runs:.2f}J")
+                div = gen_len if name == "Decode" else 1
+                op = total_ej * ratio / runs / div
+                fw = total_ej * (1 - ratio) / runs / div
+                per = " (per token)" if div > 1 else ""
+                print(f"  {name:15s}{per}  operator={op:.2f}J  framework={fw:.2f}J  total={total_ej/runs/div:.2f}J")
                 print(f"  {'':15s}  GPU busy={gpu_s*1000:.0f}/{wall_s*1000:.0f}ms ({ratio*100:.1f}%)")
 
     if len(results) >= 2:
