@@ -89,39 +89,20 @@ def _summary_extra(graph, combined, decode_graph, gen_len, pf_ai, profiler=None)
 
     # Hardware profiling info
     if profiler and profiler.available:
-        tot_t = profiler._prefill_total_us + profiler._decode_total_us
-        ms_pf = profiler._prefill_total_us / 1000
-        ms_dc = profiler._decode_total_us / 1000
-        mem = profiler._memory_peak / 1e6
-        evts = profiler._trace_data
-
-        n_all = len(evts)
-        n_real = sum(1 for e in evts if e["duration_us"] > 0)
-        n_copy = sum(1 for e in evts if "Memcpy" in e["name"] or b"Memset" in e["name"].encode())
-        t_real = sum(e["duration_us"] for e in evts if e["duration_us"] > 0) / 1000
-        t_total = tot_t / 1000
-
-        tot_f = sum(n.flops for n in combined.nodes)
+        pf_t = profiler._prefill_total_us / 1000
+        dc_t = profiler._decode_total_us / 1000
+        tot_t = pf_t + dc_t
+        mem = max(profiler._memory_peak - profiler._memory_start, 0) / 1e6
+        if pf_t > 0 or dc_t > 0:
+            lines.append(f"    GPU time: Prefill={pf_t:.2f}ms, Decode={dc_t:.2f}ms")
+            lines.append(f"    GPU memory: {mem:.0f}MB")
         tot_b = sum(n.memory_bytes for n in combined.nodes)
-        peak_bw = HARDWARE["memory_bw"] / 1e9
-
-        if ms_pf > 0 or ms_dc > 0:
-            lines.append(f"    GPU time: Prefill={ms_pf:.2f}ms, Decode={ms_dc:.2f}ms")
-        if n_real > 0:
-            lines.append(f"    GPU kernels: {n_real} compute + {n_copy} copy, "
-                         f"peak mem={mem:.0f}MB")
-            lines.append(f"    Avg kernel: {t_real/n_real:.1f}us, "
-                         f"compute time ratio={t_real/t_total*100:.1f}%")
-        if t_total > 0 and tot_b > 0:
-            bw = tot_b / t_total / 1e6  # bytes/ms = GB/s
-            util = bw / peak_bw * 100
-            lines.append(f"    Achieved BW: {bw:.0f} GB/s ({util:.0f}% of H100 peak)")
-            flops_util = tot_f / (t_total / 1000) / (HARDWARE["peak_flops"] / 1e12) * 100
-            lines.append(f"    FLOPs util: {flops_util:.1f}% ({tot_f/1e12:.2f} TFLOPs / "
-                         f"{t_total/1000:.2f}s)")
-        if gen_len > 0 and ms_dc > 0:
-            tps = gen_len / (ms_dc / 1000)
-            lines.append(f"    Throughput: {tps:.1f} tokens/s")
+        if tot_t > 0 and tot_b > 0:
+            bw = tot_b / tot_t / 1e6
+            peak_bw = HARDWARE["memory_bw"] / 1e9
+            lines.append(f"    Achieved BW: {bw:.0f} GB/s ({bw/peak_bw*100:.0f}% of H100)")
+        if gen_len > 0 and dc_t > 0:
+            lines.append(f"    Throughput: {gen_len/(dc_t/1000):.1f} tokens/s")
 
     for op, cnt in sorted(combined.get_operator_counts().items(), key=lambda x: -x[1]):
         lines.append(f"  {op:25s}: {cnt}")
@@ -175,13 +156,13 @@ def run_pytorch_mode():
     prefix = ""
 
     print(f"\n{'=' * 60}")
-    print(f"  Prompt [{i}]: \"{prompt}\"")
+    print(f"  Prompt: \"{prompt}\"")
     print(f"  tokens: {seq_len}")
 
     # Step 1: Prefill
     print(f"  [Phase 1/3] Prefill")
     if HARDWARE_PROFILING and profiler.available:
-        _ = profiler.trace(model, prompt_ids, label="prefill")
+        _ = profiler.time_forward(model, prompt_ids, label="prefill")
     prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
     prefill_graph.prompt_text = prompt
     prefill_graph.prompt_tokens = seq_len
@@ -223,7 +204,7 @@ def run_pytorch_mode():
             print("    (no output - model may need different prompts)")
         if HARDWARE_PROFILING and profiler.available:
             try:
-                _ = profiler.trace_generate(model, prompt_ids, **kw)
+                _ = profiler.time_generate(model, prompt_ids, **kw)
             except Exception as pe:
                 print(f"    [profiler] trace failed: {pe}")
 
