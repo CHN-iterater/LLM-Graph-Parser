@@ -270,7 +270,7 @@ def run_pytorch_mode():
     with open(ts_path, "w") as tf:
         tf.write("start:" + _ts() + "\n")
     print(f"  start: {_ts()}")
-    write_timestamp("inference_start")
+    write_timestamp("prefill_start")
     print(f"  Prompt: \"{prompt}\"")
     print(f"  tokens: {seq_len}")
 
@@ -317,7 +317,7 @@ def run_pytorch_mode():
         print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
         if gen_len == 0:
             print("    (no output - model may need different prompts)")
-            write_timestamp("inference_end")
+            write_timestamp("decode_end")
         if HARDWARE_PROFILING and profiler.available:
             try:
                 _ = profiler.time_generate(model, prompt_ids, num_runs=PROFILING_RUNS, **kw)

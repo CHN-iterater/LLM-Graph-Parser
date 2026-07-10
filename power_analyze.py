@@ -1,12 +1,17 @@
 """
-GPU 功耗分析 — python power_analyze.py -t timestamp.txt -p power.txt
+GPU 功耗分析 — python power_analyze.py -t timestamps.txt -p power.txt
 """
 import argparse
 import numpy as np
 
 
-def parse_hhmmss(line):
-    ts = line.split()[0]
+def parse_ts_value(line):
+    raw = line.strip()
+    if ":" in raw[:6]:
+        _, ts = raw.split(":", 1)
+        ts = ts.strip()
+    else:
+        ts = raw.split()[0]
     h, m = int(ts[0:2]), int(ts[3:5])
     s, ms = ts[6:8], ts[9:12]
     return h * 3600 + m * 60 + int(s) + int(ms) / 1000
@@ -20,33 +25,22 @@ def load_power(path):
             parts = line.strip().split()
             if len(parts) < 2:
                 continue
-            times.append(parse_hhmmss(line))
+            ts = parts[0]
+            h, m = int(ts[0:2]), int(ts[3:5])
+            s, ms = ts[6:8], ts[9:12]
+            times.append(h * 3600 + m * 60 + int(s) + int(ms) / 1000)
             powers.append([float(p) for p in parts[1:]])
     return np.array(times), np.array(powers)
 
 
-def parse_ts_value(line):
-    """Parse 'start:HH:MM:SS.mmm' or 'HH:MM:SS.mmm label' → seconds."""
-    raw = line.strip()
-    # Format: start:HH:MM:SS.mmm
-    if raw.startswith("start:") or raw.startswith("end:"):
-        ts = raw.split(":", 1)[1]
-    else:
-        ts = raw.split()[0]
-    h, m = int(ts[0:2]), int(ts[3:5])
-    s, ms = ts[6:8], ts[9:12]
-    return h * 3600 + m * 60 + int(s) + int(ms) / 1000
-
-
 def load_timestamps(path):
-    start = end = None
+    ts = {}
     with open(path) as f:
         for line in f:
-            if line.startswith("start:") or "inference_start" in line:
-                start = parse_ts_value(line)
-            elif line.startswith("end:") or "inference_end" in line:
-                end = parse_ts_value(line)
-    return start, end
+            for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end"):
+                if tag in line:
+                    ts[tag] = parse_ts_value(line)
+    return ts
 
 
 def integrate(times, powers, t_start, t_end):
@@ -54,40 +48,56 @@ def integrate(times, powers, t_start, t_end):
     if not mask.any():
         return 0.0, 0.0
     total_w = powers[mask].sum(axis=1)
-    energy = np.trapz(total_w, times[mask])
+    energy = np.trapezoid(total_w, times[mask])
     return energy, float(total_w.mean())
 
 
 def main():
     parser = argparse.ArgumentParser(description="GPU 功耗分析")
-    parser.add_argument("-t", "--timestamps", default="timestamps.txt",
-                        help="令 timestamps.txt（run.py 在 output/ 目录下输出）")
-    parser.add_argument("-p", "--power", default="power.txt",
-                        help="令 power.txt（power_monitor.py 输出）")
+    parser.add_argument("-t", "--timestamps", default="timestamps.txt")
+    parser.add_argument("-p", "--power", default="power.txt")
     args = parser.parse_args()
 
     times, powers = load_power(args.power)
-    t_start, t_end = load_timestamps(args.timestamps)
-
-    if t_start is None or t_end is None:
-        print(f"[analyze] {args.timestamps}: inference_start/end 未找到")
-        try:
-            with open(args.timestamps) as f:
-                print(f"  文件内容 ({len(f.readlines())} 行):")
-                f.seek(0)
-                for line in f:
-                    print(f"    {line.rstrip()}")
-        except Exception as e:
-            print(f"  文件读取失败: {e}")
-        return
-
-    energy, avg_w = integrate(times, powers, t_start, t_end)
-    duration = t_end - t_start
+    ts = load_timestamps(args.timestamps)
     n_gpu = powers.shape[1] if powers.ndim > 1 else 0
 
-    print(f"  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
+    phases = [
+        ("Prefill", "prefill_start", "prefill_end"),
+        ("Decode", "decode_start", "decode_end"),
+    ]
+    results = []
+    for name, s, e in phases:
+        if s in ts and e in ts:
+            e_j, w = integrate(times, powers, ts[s], ts[e])
+            results.append((name, ts[e] - ts[s], e_j, w))
+
+    if not results:
+        print(f"[analyze] {args.timestamps}: timestamps not found")
+        return
+
+    # Per-GPU average power (Prefill)
+    t0 = ts.get("prefill_start")
+    t1 = ts.get("prefill_end", ts.get("decode_end"))
+    if t0 is not None and t1 is not None:
+        avg = powers[(times >= t0) & (times <= t1)].mean(axis=0)
+        print(f"  {'GPU':>5s}  {'Avg Power (W)':>14s}")
+        print(f"  {'-' * 22}")
+        for i in range(min(len(avg), 8)):
+            print(f"  {i:>5d}  {avg[i]:>10.2f}")
+
+    # Phase summary
+    print(f"\n  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
     print(f"  {'-' * 50}")
-    print(f"  {'Inference':15s}  {duration:>8.3f}s  {energy:>8.2f}J  {avg_w:>8.2f}W")
+    for name, d, e, w in results:
+        print(f"  {name:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
+
+    if len(results) >= 2:
+        td = sum(r[1] for r in results)
+        te = sum(r[2] for r in results)
+        print(f"  {'-' * 50}")
+        print(f"  {'Total':15s}  {td:>8.3f}s  {te:>8.2f}J  {te/td:>8.2f}W")
+
     print(f"\n  [{len(times)} samples, {n_gpu} GPUs]")
 
 
