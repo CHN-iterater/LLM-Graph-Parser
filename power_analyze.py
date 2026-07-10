@@ -47,17 +47,25 @@ def integrate(times, powers, t_start, t_end):
 
 def main():
     parser = argparse.ArgumentParser(description="GPU 功耗分析")
-    parser.add_argument("-t", "--timestamps", default="timestamp.txt",
-                        help="timestamp.txt 路径")
+    parser.add_argument("-t", "--timestamps", default="timestamps.txt",
+                        help="令 timestamps.txt（run.py 在 output/ 目录下输出）")
     parser.add_argument("-p", "--power", default="power.txt",
-                        help="power.txt 路径")
+                        help="令 power.txt（power_monitor.py 输出）")
     args = parser.parse_args()
 
     times, powers = load_power(args.power)
     t_start, t_end = load_timestamps(args.timestamps)
 
     if t_start is None or t_end is None:
-        print(f"[analyze] {args.timestamps}: inference_start/end not found")
+        print(f"[analyze] {args.timestamps}: inference_start/end 未找到")
+        try:
+            with open(args.timestamps) as f:
+                print(f"  文件内容 ({len(f.readlines())} 行):")
+                f.seek(0)
+                for line in f:
+                    print(f"    {line.rstrip()}")
+        except Exception as e:
+            print(f"  文件读取失败: {e}")
         return
 
     energy, avg_w = integrate(times, powers, t_start, t_end)
