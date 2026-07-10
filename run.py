@@ -282,7 +282,10 @@ def run_pytorch_mode():
     pf = prefill_graph.get_stage_stats("prefill")
     print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
     if HARDWARE_PROFILING and profiler.available:
-        print(f"    time={profiler._prefill_total_us/1000:.2f}ms")
+        total_gpu_us = profiler._prefill_total_us * PROFILING_RUNS
+        print(f"    time={profiler._prefill_total_us/1000:.2f}ms (per run), total GPU time={total_gpu_us/1000:.2f}ms")
+        with open(ts_path, "a") as tf:
+            tf.write(f"prefill_gpu_us {int(total_gpu_us)}\n")
     write_timestamp("prefill_end", ts_path)
 
     # Step 2: Decode

@@ -49,9 +49,14 @@ def load_timestamps(path):
     ts = {}
     with open(path) as f:
         for line in f:
+            # 普通时间戳
             for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end", "gen_start", "end"):
                 if tag in line:
                     ts[tag] = parse_ts_value(line)
+            # GPU 执行时间（μs），格式: "prefill_gpu_us 12345"
+            for tag in ("prefill_gpu_us", "decode_gpu_us"):
+                if line.startswith(tag):
+                    ts[tag] = int(line.strip().split()[1])
     return ts
 
 
@@ -88,14 +93,20 @@ def main():
         avg_baseline = 0.0
 
     phases = [
-        ("Prefill", "prefill_start", "prefill_end"),
-        ("Decode", "decode_start", "decode_end"),
-        ("Generation", "gen_start", "end"),
+        ("Prefill", "prefill_start", "prefill_end", "prefill_gpu_us"),
+        ("Decode", "decode_start", "decode_end", "decode_gpu_us"),
     ]
     results = []
-    for name, s, e in phases:
+    for name, s, e, gpu_tag in phases:
         if s in ts and e in ts:
-            e_j, w = integrate(times, inference_w, ts[s], ts[e])
+            e_j, w = integrate(times, inference_w, ts[s], ts[e])  # total, baseline-subtracted
+            wall_s = ts[e] - ts[s]
+            # 扣除 GPU idle 能耗（框架开销部分）
+            if gpu_tag in ts and avg_baseline > 0:
+                gpu_s = ts[gpu_tag] / 1e6  # GPU 忙于计算的时间（所有 runs 合计）
+                idle_s = max(0, wall_s - gpu_s)
+                idle_j = idle_s * avg_baseline  # GPU 空载时也在消耗基准功率
+                e_j = max(0, e_j - idle_j)
             e_j /= runs  # 除以重复次数，得到单次推理的能耗
             results.append((name, ts[e] - ts[s], e_j, w))
 
@@ -122,6 +133,24 @@ def main():
     print(f"  {'-' * 50}")
     for name, d, e, w in results:
         print(f"  {name:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
+    # 框架开销明细
+    has_gpu_data = any(t in ts for t in ("prefill_gpu_us", "decode_gpu_us"))
+    if has_gpu_data and n_gpu >= 2:
+        print(f"\n  [算子 vs 框架开销分解]")
+        for name, s, e, gpu_tag in phases:
+            if s in ts and e in ts and gpu_tag in ts:
+                wall_s = ts[e] - ts[s]
+                gpu_s = ts[gpu_tag] / 1e6
+                idle_s = wall_s - gpu_s
+                total_ej, _ = integrate(times, inference_w, ts[s], ts[e])
+                idle_j = idle_s * avg_baseline
+                op_j = total_ej - idle_j
+                print(f"  {name:15s}  wall={wall_s*1000:.1f}ms, "
+                      f"GPU busy={gpu_s*1000:.1f}ms, "
+                      f"idle={idle_s*1000:.1f}ms")
+                print(f"  {'':15s}  operator={op_j/runs:.2f}J, "
+                      f"framework={idle_j/runs:.2f}J, "
+                      f"total={total_ej/runs:.2f}J")
 
     if len(results) >= 2:
         td = sum(r[1] for r in results)
