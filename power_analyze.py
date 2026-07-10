@@ -1,38 +1,21 @@
 """
-功耗分析脚本 — 从 power.txt + timestamp.txt 计算单次推理能耗。
-
-用法:
-    python power_analyze.py power.txt
-
-输入:
-    power.txt:      HH:MM:SS.mmm gpu0_W gpu1_W ... gpu7_W
-    timestamp.txt:  run.py 同目录下自动生成
-                    HH:MM:SS.mmm inference_start
-                    HH:MM:SS.mmm inference_end
-
-输出:
-    prefill / decode / total 各阶段能耗 (J) 和平均功率 (W)
+GPU 功耗分析 — python power_analyze.py -t timestamp.txt -p power.txt
 """
-
-import sys
+import argparse
 import numpy as np
-from datetime import datetime
 
 
 def parse_hhmmss(line):
-    """Parse 'HH:MM:SS.mmm' at start of line → seconds since epoch."""
     ts = line.split()[0]
-    parts = ts.split(":")
-    h, m = int(parts[0]), int(parts[1])
-    s, ms = parts[2].split(".")
+    h, m = int(ts[0:2]), int(ts[3:5])
+    s, ms = ts[6:8], ts[9:12]
     return h * 3600 + m * 60 + int(s) + int(ms) / 1000
 
 
 def load_power(path):
-    """Load power.txt → (seconds[], power_matrix[sample, gpu])."""
     times, powers = [], []
     with open(path) as f:
-        f.readline()  # skip header
+        f.readline()
         for line in f:
             parts = line.strip().split()
             if len(parts) < 2:
@@ -42,8 +25,7 @@ def load_power(path):
     return np.array(times), np.array(powers)
 
 
-def load_timestamps(path="timestamp.txt"):
-    """Load timestamp.txt → (start_seconds, end_seconds)."""
+def load_timestamps(path):
     start = end = None
     with open(path) as f:
         for line in f:
@@ -55,37 +37,37 @@ def load_timestamps(path="timestamp.txt"):
 
 
 def integrate(times, powers, t_start, t_end):
-    """Trapezoidal integration of total GPU power over [t_start, t_end] → Joules."""
     mask = (times >= t_start) & (times <= t_end)
     if not mask.any():
         return 0.0, 0.0
     total_w = powers[mask].sum(axis=1)
-    dt = times[mask]
-    energy = np.trapz(total_w, dt)
-    avg_w = float(total_w.mean())
-    return energy, avg_w
+    energy = np.trapz(total_w, times[mask])
+    return energy, float(total_w.mean())
 
 
 def main():
-    if len(sys.argv) < 2:
-        power_file = "power.txt"
-    else:
-        power_file = sys.argv[1]
+    parser = argparse.ArgumentParser(description="GPU 功耗分析")
+    parser.add_argument("-t", "--timestamps", default="timestamp.txt",
+                        help="timestamp.txt 路径")
+    parser.add_argument("-p", "--power", default="power.txt",
+                        help="power.txt 路径")
+    args = parser.parse_args()
 
-    times, powers = load_power(power_file)
-    t_start, t_end = load_timestamps()
+    times, powers = load_power(args.power)
+    t_start, t_end = load_timestamps(args.timestamps)
 
     if t_start is None or t_end is None:
-        print("[analyze] timestamp.txt 中缺少 inference_start/inference_end")
-        sys.exit(1)
+        print(f"[analyze] {args.timestamps}: inference_start/end not found")
+        return
 
     energy, avg_w = integrate(times, powers, t_start, t_end)
     duration = t_end - t_start
+    n_gpu = powers.shape[1] if powers.ndim > 1 else 0
 
     print(f"  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
     print(f"  {'-' * 50}")
     print(f"  {'Inference':15s}  {duration:>8.3f}s  {energy:>8.2f}J  {avg_w:>8.2f}W")
-    print(f"\n  [{len(times)} power samples, {powers.shape[1]} GPUs]")
+    print(f"\n  [{len(times)} samples, {n_gpu} GPUs]")
 
 
 if __name__ == "__main__":

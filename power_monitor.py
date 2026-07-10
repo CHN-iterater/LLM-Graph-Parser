@@ -1,97 +1,75 @@
 """
-GPU 功耗采集脚本 — 用 pynvml 同时采样 8 张 H100 的实时功率。
+GPU 功耗采集 — pynvml 或 nvidia-smi 采样 8 张 H100 实时功率。
 
 用法:
-    # 默认间隔 100ms，输出到 power.txt
     python power_monitor.py
-
-    # 指定间隔 50ms，输出到 my_power.txt
-    python power_monitor.py -i 50 -o my_power.txt
-
-    # 配合 LLM Graph Parser 使用:
-    # 终端 1: python power_monitor.py -i 50
-    # 终端 2: HARDWARE_PROFILING=True python run.py
-
-输出格式 (power.txt):
-    HH:MM:SS.mmm gpu0_W gpu1_W gpu2_W gpu3_W gpu4_W gpu5_W gpu6_W gpu7_W
-    14:30:01.023 86 87 85 87 88 83 84 81
-    14:30:01.125 86 87 85 87 88 83 84 81
+    python power_monitor.py -i 50 --use-smi
 """
-
-import argparse
-import time
+import argparse, subprocess, datetime
 from threading import Thread, Event
 
 
-def get_power_handles():
-    """初始化 pynvml 并返回 8 张 GPU 的功率句柄。"""
+def get_power(use_smi=False):
+    """返回 [gpu0_W, ..., gpu7_W] 或 None。"""
+    # 方法1: nvidia-smi
+    if use_smi:
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                return [v.strip().replace(" W", "") for v in r.stdout.strip().split("\n")]
+        except Exception:
+            pass
+
+    # 方法2: pynvml
     try:
         import pynvml
-    except ImportError:
-        print("[power] 请先安装 pynvml: pip install nvidia-ml-py")
-        raise
-    pynvml.nvmlInit()
-    device_count = pynvml.nvmlDeviceGetCount()
-    handles = []
-    for i in range(min(device_count, 8)):
-        handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-        handles.append(handle)
-    return handles
+        pynvml.nvmlInit()
+        vals = []
+        for i in range(min(pynvml.nvmlDeviceGetCount(), 8)):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            vals.append(f"{pynvml.nvmlDeviceGetPowerUsage(h) / 1000:.1f}")
+        return vals
+    except Exception:
+        pass
+    return None
 
 
-def sample_power(handles, interval_ms, max_samples, output, stop):
-    """Sample GPU power at fixed intervals."""
-    header = "HH:MM:SS.mmm " + " ".join([f"gpu{i}_W" for i in range(len(handles))])
-    with open(output, "w") as fp:
-        fp.write(header + chr(10))
-        sampled = 0
-        while not stop.is_set() and (max_samples <= 0 or sampled < max_samples):
-            import datetime as dt
-            now = dt.datetime.now()
+def sample(interval_ms, max_samples, output, stop, use_smi):
+    with open(output, "w") as f:
+        f.write("HH:MM:SS.mmm " + " ".join([f"gpu{i}_W" for i in range(8)]) + "\n")
+        n = 0
+        while not stop.is_set() and (max_samples <= 0 or n < max_samples):
+            now = datetime.datetime.now()
             ts = now.strftime("%H:%M:%S.") + f"{now.microsecond // 1000:03d}"
-            powers = []
-            for handle in handles:
-                try:
-                    mw = pynvml.nvmlDeviceGetPowerUsage(handle)
-                    powers.append(f"{mw / 1000:.1f}")
-                except Exception:
-                    powers.append("N/A")
-            fp.write(ts + " " + " ".join(powers) + chr(10))
-            fp.flush()
-            sampled += 1
+            vals = get_power(use_smi) or ["N/A"] * 8
+            while len(vals) < 8:
+                vals.append("N/A")
+            f.write(ts + " " + " ".join(vals[:8]) + "\n")
+            f.flush()
+            n += 1
             stop.wait(interval_ms / 1000)
-def main():
-    parser = argparse.ArgumentParser(description="GPU 功耗采集（pynvml，8 张 H100）")
-    parser.add_argument("-i", "--interval", type=int, default=100,
-                        help="采样间隔 (ms)，默认 100")
-    parser.add_argument("-n", "--max-samples", type=int, default=0,
-                        help="最大采样次数，0=持续到手动停止")
-    parser.add_argument("-o", "--output", default="power.txt",
-                        help="输出文件，默认 power.txt")
-    args = parser.parse_args()
 
-    handles = get_power_handles()
-    print(f"[power] 检测到 {len(handles)} 张 GPU")
-    print(f"[power] 开始采集 (间隔={args.interval}ms, 输出={args.output})")
-    if args.max_samples > 0:
-        print(f"[power] 将采集 {args.max_samples} 次后自动停止")
-    else:
-        print("[power] 按 Ctrl+C 停止")
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("-i", "--interval", type=int, default=100)
+    p.add_argument("-n", "--max-samples", type=int, default=0)
+    p.add_argument("-o", "--output", default="power.txt")
+    p.add_argument("--use-smi", action="store_true")
+    a = p.parse_args()
 
     stop = Event()
-    t = Thread(target=sample_power,
-               args=(handles, args.interval, args.max_samples, args.output, stop),
-               daemon=True)
-    t.start()
-
+    Thread(target=sample, args=(a.interval, a.max_samples, a.output, stop, a.use_smi),
+           daemon=True).start()
+    print(f"[power] sampling ({a.interval}ms) -> {a.output}")
     try:
-        while t.is_alive():
-            t.join(1)
+        while True:
+            Thread._sleep(1)
     except KeyboardInterrupt:
-        print("\n[power] 停止采集")
         stop.set()
-
-    print(f"[power] 结果已保存到 {args.output}")
+    print(f"\n[power] saved to {a.output}")
 
 
 if __name__ == "__main__":
