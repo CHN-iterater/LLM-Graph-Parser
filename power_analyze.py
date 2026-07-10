@@ -1,8 +1,10 @@
 """
-GPU 功耗分析 — python power_analyze.py -t timestamps.txt -p power.txt
+GPU 功耗分析 — python power_analyze.py -t timestamps.txt -p power.txt [-n 20]
 """
 import argparse
 import numpy as np
+
+DEFAULT_RUNS = 20  # 默认 profiling 重复次数（对应 run.py 中的 PROFILING_RUNS）
 
 
 def parse_ts_value(line):
@@ -64,11 +66,14 @@ def main():
     parser = argparse.ArgumentParser(description="GPU 功耗分析")
     parser.add_argument("-t", "--timestamps", default="timestamps.txt")
     parser.add_argument("-p", "--power", default="power.txt")
+    parser.add_argument("-n", "--runs", type=int, default=DEFAULT_RUNS,
+                        help=f"profiling 重复次数，能耗除以该值得到单次结果（默认 {DEFAULT_RUNS}）")
     args = parser.parse_args()
 
     times, powers = load_power(args.power)
     ts = load_timestamps(args.timestamps)
     n_gpu = powers.shape[1] if powers.ndim > 1 else 0
+    runs = max(args.runs, 1)
 
     phases = [
         ("Prefill", "prefill_start", "prefill_end"),
@@ -79,6 +84,7 @@ def main():
     for name, s, e in phases:
         if s in ts and e in ts:
             e_j, w = integrate(times, powers, ts[s], ts[e])
+            e_j /= runs  # 除以重复次数，得到单次推理的能耗
             results.append((name, ts[e] - ts[s], e_j, w))
 
     if not results:
@@ -95,8 +101,9 @@ def main():
         for i in range(min(len(avg), 8)):
             print(f"  {i:>5d}  {avg[i]:>10.2f}")
 
-    # Phase summary
-    print(f"\n  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
+    # Phase summary (per-run)
+    print(f"\n  (除以 {runs} 次 profiling runs，以下为单次推理结果)")
+    print(f"  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
     print(f"  {'-' * 50}")
     for name, d, e, w in results:
         print(f"  {name:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
@@ -107,7 +114,7 @@ def main():
         print(f"  {'-' * 50}")
         print(f"  {'Total':15s}  {td:>8.3f}s  {te:>8.2f}J  {te/td:>8.2f}W")
 
-    print(f"\n  [{len(times)} samples, {n_gpu} GPUs]")
+    print(f"\n  [{len(times)} power samples, {n_gpu} GPUs]")
 
 
 if __name__ == "__main__":
