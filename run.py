@@ -358,7 +358,8 @@ def run_pytorch_mode():
     print("\n" + "=" * 60)
     print(text)
     print("=" * 60)
-    tf.write("end:" + _ts() + "\n")
+    with open(ts_path, "a") as tf:
+        tf.write("end:" + _ts() + "\n")
     print(f"  end:   {_ts()}")
     print(f"\n所有结果已保存到: {output_dir}/")
 
