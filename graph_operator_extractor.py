@@ -101,7 +101,7 @@ def main():
 
     # 写出 CSV
     rows = []
-    for (op_type, in_str, out_str, stage), info in sorted(groups.items(), key=lambda x: -x[1]["cnt"]):
+    for (op_type, in_str, out_str, stage), info in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1], x[0][2], x[0][3])):
         iN, iM, iK = extract_mnk(info["input_shapes"], is_input=True, op_type=op_type)
         oN, oM, oK = extract_mnk(info["output_shapes"], is_input=False, op_type=op_type)
         rows.append([op_type, iN, iM, iK, oN, oM, oK, stage, info["cnt"]])
@@ -115,11 +115,9 @@ def main():
     # 控制台打印摘要
     print(f"{'算子名':20s} {'入N':>6s} {'入M':>6s} {'入K':>6s} {'出N':>6s} {'出M':>6s} {'出K':>6s} {'Cnt':>5s} {'阶段':8s}")
     print("-" * 85)
-    for r in rows[:25]:
+    for r in rows:
         op, iN, iM, iK, oN, oM, oK, stage, cnt = r
         print(f"{op:20s} {str(iN):>6s} {str(iM):>6s} {str(iK):>6s} {str(oN):>6s} {str(oM):>6s} {str(oK):>6s} {cnt:>5d} {stage:8s}")
-    if len(rows) > 25:
-        print(f"  ... 共 {len(rows)} 种组合")
     print(f"\n已保存: {out_path.resolve()}")
 
 
