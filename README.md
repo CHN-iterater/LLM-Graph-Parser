@@ -254,7 +254,7 @@ h100 = HardwareProfile(name="H100-SXM", peak_flops_fp16=1979e12,
 
 ```bash
 python energy_consumption_refactor.py \
-    -c single_operator_summary.csv \
+    -c ../single_operator_summary.csv \
     -g output/ModelName_timestamp/graph.json \
     --gen-len 20
 ```
@@ -280,7 +280,7 @@ python power_analyze.py -t timestamps.txt -p power.txt -n 20
 
 | 脚本 | 用途 | 位置 |
 |------|------|------|
-| `energy_consumption_refactor.py` | 方向 1: 算子能耗重构 | 项目根目录 |
+| `energy_consumption_refactor.py` | 方向 1: 算子能耗重构 | `LLM_Graph_Parser/` |
 | `power_monitor.py` | 方向 2: GPU 功耗采样 | `LLM_Graph_Parser/` |
 | `power_analyze.py` | 方向 2: 功耗分析 | `LLM_Graph_Parser/` |
 
