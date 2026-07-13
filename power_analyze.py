@@ -112,13 +112,16 @@ def main():
 
         wall_s = ts[e] - ts[s]  # total wall time for all runs
 
-        # — 总净能耗（硬件计数器优先，功率积分回退）—
+        # — 总能耗（硬件计数器优先，功率积分回退）—
         energy_tag_s = f"{s}_energy_j"
         energy_tag_e = f"{e}_energy_j"
         if energy_tag_s in ts and energy_tag_e in ts:
-            e_j_total = ts[energy_tag_e] - ts[energy_tag_s]
+            e_j_all = ts[energy_tag_e] - ts[energy_tag_s]
+            # 硬件计数器读的是 GPU 0 原始累计能耗，扣除空闲基准
+            e_j_dynamic = e_j_all - avg_baseline * wall_s if n_gpu >= 2 else e_j_all
         else:
-            e_j_total, _ = integrate(times, inference_w, ts[s], ts[e])
+            # 功率积分法已通过 inference_w 扣除过基准
+            e_j_dynamic, _ = integrate(times, inference_w, ts[s], ts[e])
 
         # — GPU 活跃比例 → 算子能耗 —
         if gpu_tag in ts:
@@ -126,7 +129,7 @@ def main():
             ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
         else:
             ratio = 1.0
-        e_j_ops = e_j_total * ratio / runs  # 算子纯净能耗（单次）
+        e_j_ops = e_j_dynamic * ratio / runs  # 算子纯净能耗（单次）
 
         # — 对齐口径 —
         avg_power = (e_j_total / runs) / (wall_s if wall_s > 0 else 1)
@@ -177,6 +180,7 @@ def main():
                 energy_tag_e = f"{e}_energy_j"
                 if energy_tag_s in ts and energy_tag_e in ts:
                     total_ej = ts[energy_tag_e] - ts[energy_tag_s]
+                    total_ej -= avg_baseline * (ts[e] - ts[s])  # 扣除空闲基准
                 else:
                     total_ej, _ = integrate(times, inference_w, ts[s], ts[e])
                 gpu_s = ts[gpu_tag] / 1e6
