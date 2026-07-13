@@ -143,18 +143,22 @@ def main():
         print(f"[analyze] {args.timestamps}: timestamps not found")
         return
 
-    # Per-GPU average power + 基准功耗
+    # Per-GPU average power + 基准功耗（仅 power_monitor 在运行时有效）
     t0 = ts.get("prefill_start")
     t1 = ts.get("prefill_end", ts.get("decode_end"))
     if t0 is not None and t1 is not None:
-        avg = powers[(times >= t0) & (times <= t1)].mean(axis=0)
-        print(f"  {'GPU':>5s}  {'Avg Power (W)':>14s}")
-        print(f"  {'-' * 22}")
-        for i in range(min(len(avg), 8)):
-            print(f"  {i:>5d}  {avg[i]:>10.2f}")
-        if n_gpu >= 2:
-            print(f"\n  Baseline (idle GPU 1~{n_gpu-1} avg): {avg_baseline:.2f} W")
-            print(f"  Inference-only (GPU 0 - baseline): {avg[0] - avg_baseline:.2f} W")
+        mask = (times >= t0) & (times <= t1)
+        if mask.any():
+            avg = powers[mask].mean(axis=0)
+            print(f"  {'GPU':>5s}  {'Avg Power (W)':>14s}")
+            print(f"  {'-' * 22}")
+            for i in range(min(len(avg), 8)):
+                print(f"  {i:>5d}  {avg[i]:>10.2f}")
+            if n_gpu >= 2:
+                print(f"\n  Baseline (idle GPU 1~{n_gpu-1} avg): {avg_baseline:.2f} W")
+                print(f"  Inference-only (GPU 0 - baseline): {avg[0] - avg_baseline:.2f} W")
+        else:
+            print("  [power.txt: no samples in prefill window — run power_monitor.py for per-GPU display]")
 
     # Phase summary (per-run)
     print(f"\n  (除以 {runs} 次 profiling runs，以下为单次推理结果)")
