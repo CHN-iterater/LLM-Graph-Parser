@@ -106,8 +106,11 @@ def estimate(node, db, aux_energy_fb):
     flops = node.get("flops", 0) or 0
     mem = node.get("memory_bytes", 0) or 0
 
-    # 辅助算子：无 OP_MAP 映射的用固定 fallback
+    # 辅助算子：无 OP_MAP 映射的按 memory_bytes 缩放（仅当 mem > 0）
     if t in AUXILIARY_OPS and not OP_MAP.get(t):
+        if mem > 0:
+            unit_mem = 16384  # 4 × 4096 (FP16 读写各一次，一个 hidden_size 向量)
+            return aux_energy_fb * max(1.0, mem / unit_mem)
         return aux_energy_fb
 
     csv_name = OP_MAP.get(t)
