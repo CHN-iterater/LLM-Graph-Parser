@@ -14,7 +14,7 @@ from llm_graph_parser.hardware import HardwareProfiler
 # 配置区
 # ====================================================================
 MODE = "pytorch"
-MODEL_SOURCE = "../Models/Qwen3-0.6B"
+MODEL_SOURCE = "../Models/MiniMind2-Small"
 PROMPT = "What's the capital of France?"
 MAX_NEW_TOKENS = 20
 SKIP_GENERATION = False
@@ -457,9 +457,40 @@ def run_onnx_mode():
 
 # ====================================================================
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="LLM Graph Parser")
+    parser.add_argument("--mode", choices=["pytorch", "onnx"], default=None,
+                        help="运行模式")
+    parser.add_argument("-m", "--model", default=None,
+                        help="模型名或路径（自动映射 ../Models/NAME，完整路径直接使用）")
+    parser.add_argument("--prompt", default=None,
+                        help="提示词（默认: What's the capital of France?）")
+    parser.add_argument("--max-new-tokens", type=int, default=None,
+                        help="最大生成 token 数")
+    parser.add_argument("--no-hardware", action="store_true",
+                        help="禁用硬件 profiling")
+    parser.add_argument("--runs", type=int, default=None,
+                        help="profiling 重复次数")
+    _a = parser.parse_args()
+
+    if _a.mode:
+        MODE = _a.mode
+    if _a.model:
+        MODEL_SOURCE = _a.model
+        if not MODEL_SOURCE.startswith("/") and not MODEL_SOURCE.startswith("..") and not MODEL_SOURCE.startswith("."):
+            MODEL_SOURCE = f"../Models/{MODEL_SOURCE}"
+    if _a.prompt is not None:
+        PROMPT = _a.prompt
+    if _a.max_new_tokens is not None:
+        MAX_NEW_TOKENS = _a.max_new_tokens
+    if _a.no_hardware:
+        HARDWARE_PROFILING = False
+    if _a.runs is not None:
+        PROFILING_RUNS = _a.runs
+
     print("=" * 60)
     print("  LLM Graph Parser")
-    print(f"  模式: {MODE}")
+    print(f"  模式: {MODE}  |  模型: {MODEL_SOURCE}")
     print("=" * 60)
     if MODE == "pytorch":
         run_pytorch_mode()
