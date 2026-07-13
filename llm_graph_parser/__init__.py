@@ -43,10 +43,17 @@ def parse_model(model, *example_args, model_name: str = "model",
         from transformers.cache_utils import DynamicCache
         import torch.utils._pytree as pytree
         def _dc_flatten(c):
-            return ([c.key_cache, c.value_cache], None)
+            d = c.__dict__
+            k = d.get('_key_cache') or d.get('key_cache', [])
+            v = d.get('_value_cache') or d.get('value_cache', [])
+            return ([k, v], None)
         def _dc_unflatten(v, _):
             cache = DynamicCache()
-            cache.key_cache, cache.value_cache = v[0], v[1]
+            d = cache.__dict__
+            if '_key_cache' in d:
+                d['_key_cache'] = v[0]; d['_value_cache'] = v[1]
+            else:
+                d['key_cache'] = v[0]; d['value_cache'] = v[1]
             return cache
         pytree.register_pytree_node(DynamicCache, _dc_flatten, _dc_unflatten)
     except Exception:
