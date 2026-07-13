@@ -132,7 +132,7 @@ def main():
         e_j_ops = e_j_dynamic * ratio / runs  # 算子纯净能耗（单次）
 
         # — 对齐口径 —
-        avg_power = (e_j_total / runs) / (wall_s if wall_s > 0 else 1)
+        avg_power = (e_j_dynamic / runs) / (wall_s if wall_s > 0 else 1)
         if name == "Decode":
             e_j_ops /= gen_len
             wall_s /= gen_len
