@@ -133,13 +133,15 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("-c", "--csv", required=True)
     p.add_argument("-g", "--graph", required=True)
-    p.add_argument("-o", "--output", default="energy_report.txt")
+    p.add_argument("-o", "--output", default="", help="输出路径（默认与 graph.json 同目录）")
     p.add_argument("-v", "--verbose", action="store_true", help="打印每个算子的映射与分类详情")
     p.add_argument("--gen-len", type=int, default=1, help="生成 token 数，decode 能量乘以该值（默认 1）")
     args = p.parse_args()
 
     db, aux_energy = load_operator_energy(args.csv)
     nodes, summary = load_graph(args.graph)
+    graph_dir = Path(args.graph).parent
+    output_path = Path(args.output) if args.output else graph_dir / "energy_report.txt"
     if not nodes:
         print(f"[energy] {args.graph}: empty")
         return
@@ -195,10 +197,10 @@ def main():
         return op_energy, op_count, total_e, primary_e, aux_e, total_f
 
     stages = []
-    for label, sn, mul in [("Prefill", pf_nodes, 1), ("Decode", dc_nodes, args.gen_len)]:
+    for label, sn in [("Prefill", pf_nodes), ("Decode", dc_nodes)]:
         if sn:
             r = stage_report(sn)
-            stages.append((label, sn, r[0], r[1], r[2] * mul, r[3] * mul, r[4] * mul, r[5] * mul))
+            stages.append((label, sn, *r))  # 存储单 token 值，不在 stages 中乘以 gen_len
 
     # ---- 组装报告 ----
     lines = [
@@ -217,24 +219,26 @@ def main():
     grand_flops = 0
 
     for label, sn, _, _, total, pe, ae, tf in stages:
+        mul = args.gen_len if label == "Decode" else 1
         n_count = len(sn)
+        label_display = f"{label} (per token)" if mul > 1 else label
         lines += [
             "",
-            f"  --- {label} ---",
+            f"  --- {label_display} ---",
             f"  Nodes: {n_count:>6d}  FLOPs: {tf/1e9:.2f} G",
             f"  Energy:     {total:.4f} J ({total*1000:.2f} mJ)",
             f"    ├─ Primary: {pe:.4f} J ({pe/total*100:.1f}%)",
             f"    └─ Auxiliary: {ae:.4f} J ({ae/total*100:.1f}%)",
         ]
-        grand_total += total
-        grand_primary += pe
-        grand_aux += ae
-        grand_flops += tf
+        grand_total += total * mul
+        grand_primary += pe * mul
+        grand_aux += ae * mul
+        grand_flops += tf * mul
 
     lines += [
         "",
         "-" * 70,
-        f"  Prefill + Decode x{args.gen_len} (aggregated):",
+        f"  Aggregated (prefill + decode x{args.gen_len}):",
         f"  Total energy: {grand_total:.4f} J ({grand_total*1000:.2f} mJ)  "
         f"FLOPs: {grand_flops/1e9:.2f} G",
         f"    ├─ Primary: {grand_primary:.4f} J ({grand_primary/grand_total*100:.1f}%)",
@@ -243,9 +247,10 @@ def main():
 
     # ---- 每个阶段的算符明细 ----
     for label, sn, op_energy, op_count, total, pe, ae, tf in stages:
+        label_disp = f"{label} (per token)" if (label == "Decode" and args.gen_len > 1) else label
         lines += [
             "",
-            f"  {label} operators:",
+            f"  {label_disp} operators:",
             f"  {'Operator':25s} {'Cnt':>5s} {'Energy(J)':>10s} {'%':>6s}",
             "  " + "-" * 48,
         ]
@@ -260,13 +265,13 @@ def main():
         lines.append(f"  {'Auxiliary subtotal':25s} {'':>5s} {ae_sub:>8.6f}  {ae_sub/total*100:>5.1f}%")
 
     lines.append("")
-    lines.append("  Note: Primary operators scaled by FLOPs ratio from benchmark data.")
-    lines.append("  Auxiliary ops with OP_MAP mapping use their target benchmark energy; others use min as fallback.")
+    lines.append("  Note: Prefill = 1 forward pass. Decode = 1 token (multiply by gen_len for total).")
+    lines.append("  Primary ops scaled by FLOPs ratio; auxiliary mapped ops use target benchmark energy.")
 
     text = "\n".join(lines)
     print(text)
-    Path(args.output).write_text(text, encoding="utf-8")
-    print(f"  -> saved to {args.output}")
+    output_path.write_text(text, encoding="utf-8")
+    print(f"  -> saved to {output_path}")
 
     # ---- Token-level energy report ----
     decode_data = None
@@ -276,15 +281,14 @@ def main():
             break
 
     if decode_data:
-        op_energy, op_count, total_all, aux_all = decode_data
-        per_token = total_all / args.gen_len
-        aux_per = aux_all / args.gen_len
-        pri_per = per_token - aux_per
+        op_energy, op_count, total_per, aux_per = decode_data
+        pri_per = total_per - aux_per
         token_energy_txt = [
             "=" * 70,
             "  Token-level Energy Breakdown",
             "=" * 70,
             f"  Decode steps: {args.gen_len}",
+            f"  Per-token energy: {total_per:.6f}J",
             f"  Each step executes the same operator graph ({sum(op_count.values())} nodes):",
             "",
         ]
@@ -292,7 +296,7 @@ def main():
             c = op_count[op]
             token_energy_txt.append(f"    {op:25s} x{c:>4d}  {e:>8.6f}J")
         token_energy_txt.append(f"    {'-'*48}")
-        token_energy_txt.append(f"    {'Total per token':25s}  {per_token:>8.6f}J")
+        token_energy_txt.append(f"    {'Total per token':25s}  {total_per:>8.6f}J")
         token_energy_txt.append(f"    {'Auxiliary':25s}  {aux_per:>8.6f}J")
         token_energy_txt.append(f"    {'Primary':25s}  {pri_per:>8.6f}J")
         token_energy_txt.append("")
@@ -300,19 +304,19 @@ def main():
         token_energy_txt.append(f"  {'-'*6}  {'-'*10}  {'-'*10}  {'-'*10}  {'-'*14}")
         cum = 0.0
         for step in range(1, args.gen_len + 1):
-            cum += per_token
+            cum += total_per
             token_energy_txt.append(
-                f"  {step:>6d}  {per_token:>10.6f}  {aux_per:>10.6f}  "
+                f"  {step:>6d}  {total_per:>10.6f}  {aux_per:>10.6f}  "
                 f"{pri_per:>10.6f}  {cum:>14.6f}")
         token_energy_txt.append(f"  {'-'*6}  {'-'*10}  {'-'*10}  {'-'*10}  {'-'*14}")
         token_energy_txt.append(f"  {'Total':>6s}  {cum:>10.6f}J")
-        token_energy_txt.append(f"  {'Avg/token':>6s}  {per_token:>10.6f}J")
+        token_energy_txt.append(f"  {'Avg/token':>6s}  {total_per:>10.6f}J")
         token_energy_txt.append("")
         token_energy_txt.append("  Note: All decode tokens use the same ONNX graph. The first token may have")
         token_energy_txt.append("  additional KV cache initialization overhead not captured here.")
 
         token_text = "\n".join(token_energy_txt)
-        token_path = Path(args.output).with_name(Path(args.output).stem + "_token_energy.txt")
+        token_path = output_path.with_name(output_path.stem + "_token_energy.txt")
         token_path.write_text(token_text, encoding="utf-8")
         print(f"  -> saved to {token_path}")
 
