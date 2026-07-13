@@ -58,6 +58,11 @@ def load_timestamps(path):
             for tag in ("prefill_gpu_us", "decode_gpu_us"):
                 if line.startswith(tag):
                     ts[tag] = int(line.strip().split()[1])
+            # 硬件累计能量（J），格式: "prefill_start_energy_j 1234.56"
+            for tag in ("start_energy_j", "prefill_start_energy_j", "prefill_end_energy_j",
+                        "gen_start_energy_j", "gen_end_energy_j"):
+                if line.startswith(tag):
+                    ts[tag] = float(line.strip().split()[1])
     return ts
 
 
@@ -100,22 +105,39 @@ def main():
         ("Prefill", "prefill_start", "prefill_end", "prefill_gpu_us"),
         ("Decode", "gen_start", "gen_end", "decode_gpu_us"),
     ]
+    use_energy_counter = ("prefill_start_energy_j" in ts) or ("gen_start_energy_j" in ts)
     results = []
     for name, s, e, gpu_tag in phases:
         if s in ts and e in ts:
-            e_j_total, w = integrate(times, inference_w, ts[s], ts[e])
+            energy_tag_s = f"{s}_energy_j"
+            energy_tag_e = f"{e}_energy_j"
             wall_s = ts[e] - ts[s]
-            if gpu_tag in ts:
-                gpu_s = ts[gpu_tag] / 1e6
-                ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
-                e_j = e_j_total * ratio  # 按 GPU 活跃时间比例折算算子能耗
+            if energy_tag_s in ts and energy_tag_e in ts:
+                # 硬件能量计数器直接读出（零采样误差）
+                e_j_total = ts[energy_tag_e] - ts[energy_tag_s]
+                if gpu_tag in ts:
+                    gpu_s = ts[gpu_tag] / 1e6
+                    ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
+                    e_j = e_j_total * ratio
+                else:
+                    e_j = e_j_total
             else:
-                e_j = e_j_total
+                # 功率采样后积分（fallback）
+                e_j_total, w = integrate(times, inference_w, ts[s], ts[e])
+                if gpu_tag in ts:
+                    gpu_s = ts[gpu_tag] / 1e6
+                    ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
+                    e_j = e_j_total * ratio
+                else:
+                    e_j = e_j_total
             e_j /= runs
             if name == "Decode":
                 e_j /= gen_len
                 wall_s /= gen_len  # Duration 也除以 gen_len, 和 energy 对齐
             results.append((name, wall_s, e_j, w))
+
+    method = "hardware energy counter" if use_energy_counter else "power sampling + integration"
+    print(f"  Energy source: {method}")
 
     if not results:
         print(f"[analyze] {args.timestamps}: timestamps not found")

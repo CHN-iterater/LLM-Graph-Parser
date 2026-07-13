@@ -23,6 +23,7 @@ HARDWARE_PROFILING = True
 PROFILING_RUNS = 20
 ONNX_PATH = "../Models/ONNXs/Kokoro-82M.onnx"
 HARDWARE = {"peak_flops": 1979e12, "memory_bw": 3350e9}
+ENERGY_COUNTER = True  # 用 nvml 硬件能量计数器替代功率采样积分
 
 
 # ====================================================================
@@ -45,6 +46,29 @@ def write_timestamp(label: str, path="timestamps.txt"):
     ts = now.strftime("%H:%M:%S.") + f"{now.microsecond // 1000:03d}"
     with open(path, "a") as f:
         f.write(ts + " " + label + chr(10))
+
+
+def read_energy_j():
+    """返回 GPU 0 累计能耗（J），失败返回 None。"""
+    if not ENERGY_COUNTER:
+        return None
+    try:
+        import pynvml
+        try:
+            pynvml.nvmlInit()
+        except Exception:
+            pass
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        return pynvml.nvmlDeviceGetTotalEnergyConsumption(handle) / 1000.0
+    except Exception:
+        return None
+
+
+def write_energy(label: str, path: str):
+    e = read_energy_j()
+    if e is not None:
+        with open(path, "a") as f:
+            f.write(f"{label}_energy_j {e:.4f}\n")
 
 
 
@@ -267,11 +291,13 @@ def run_pytorch_mode():
 
     print(f"\n{'=' * 60}")
     write_timestamp("start", ts_path)
+    write_energy("start", ts_path)
     print(f"  Prompt: \"{prompt}\"")
     print(f"  tokens: {seq_len}")
 
     # Step 1: Prefill
     write_timestamp("prefill_start", ts_path)
+    write_energy("prefill_start", ts_path)
     print(f"  [Phase 1/3] Prefill")
     if HARDWARE_PROFILING and profiler.available:
         _ = profiler.time_forward(model, prompt_ids, label="prefill", num_runs=PROFILING_RUNS)
@@ -286,6 +312,7 @@ def run_pytorch_mode():
         print(f"    time={profiler._prefill_total_us/1000:.2f}ms (per run), total GPU time={total_gpu_us/1000:.2f}ms")
         with open(ts_path, "a") as tf:
             tf.write(f"prefill_gpu_us {int(total_gpu_us)}\n")
+    write_energy("prefill_end", ts_path)
     write_timestamp("prefill_end", ts_path)
 
     # Step 2: Decode
@@ -306,6 +333,7 @@ def run_pytorch_mode():
         print(f"  [Phase 3/3] Skipped (SKIP_GENERATION=True)")
     else:
         write_timestamp("gen_start", ts_path)
+        write_energy("gen_start", ts_path)
         print(f"  [Phase 3/3] Generating (max {MAX_NEW_TOKENS})...")
         with torch.no_grad():
             kw = dict(max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
@@ -329,6 +357,7 @@ def run_pytorch_mode():
         total_dc_gpu_us = profiler._decode_total_us * PROFILING_RUNS
         with open(ts_path, "a") as tf:
             tf.write(f"decode_gpu_us {int(total_dc_gpu_us)}\n")
+        write_energy("gen_end", ts_path)
         write_timestamp("gen_end", ts_path)
 
     # ---- Layer partitioner ----
