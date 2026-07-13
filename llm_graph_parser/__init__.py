@@ -38,6 +38,20 @@ def parse_model(model, *example_args, model_name: str = "model",
         old_cache = model.config.use_cache
         model.config.use_cache = False
 
+    # 注册 DynamicCache 为 pytree 节点，兼容 torch.export（Gemma 等模型需要）
+    try:
+        from transformers.cache_utils import DynamicCache
+        import torch.utils._pytree as pytree
+        def _dc_flatten(c):
+            return ([c.key_cache, c.value_cache], None)
+        def _dc_unflatten(v, _):
+            cache = DynamicCache()
+            cache.key_cache, cache.value_cache = v[0], v[1]
+            return cache
+        pytree.register_pytree_node(DynamicCache, _dc_flatten, _dc_unflatten)
+    except Exception:
+        pass
+
     use_tmp = not onnx_path
     if use_tmp:
         tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)
