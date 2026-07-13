@@ -136,26 +136,12 @@ def main():
     p.add_argument("-o", "--output", default="", help="输出路径（默认与 graph.json 同目录）")
     p.add_argument("-v", "--verbose", action="store_true", help="打印每个算子的映射与分类详情")
     p.add_argument("--gen-len", type=int, default=1, help="生成 token 数，decode 能量乘以该值（默认 1）")
-    p.add_argument("--prompt-len", type=int, default=0, help="prompt 长度，用于估计首 token 因 KV cache 空载导致的额外能耗（默认自动检测）")
     args = p.parse_args()
 
     db, aux_energy = load_operator_energy(args.csv)
     nodes, summary = load_graph(args.graph)
     graph_dir = Path(args.graph).parent
     output_path = Path(args.output) if args.output else graph_dir / "energy_report.txt"
-
-    # 自动检测 prompt_len（从 prefill 节点的 tensor shape 提取 sequence length）
-    prompt_len = args.prompt_len
-    if prompt_len == 0:
-        for n in nodes:
-            if n.get("stage") != "prefill":
-                continue
-            for t in n.get("input_tensors", []):
-                s = t.get("shape", [])
-                if len(s) == 3 and s[0] == 1 and s[1] > 1:
-                    prompt_len = max(prompt_len, s[1])
-                elif len(s) == 4 and s[0] == 1 and s[2] > 1:
-                    prompt_len = max(prompt_len, s[2])
     if not nodes:
         print(f"[energy] {args.graph}: empty")
         return
@@ -223,8 +209,8 @@ def main():
         "=" * 70,
         f"  Graph:  {args.graph}",
         f"  Nodes:  {len(nodes)}  (prefill: {len(pf_nodes)} + decode: {len(dc_nodes)})",
-        f"  Generation length: {args.gen_len} tokens  |  Prompt length: {prompt_len} tokens",
-        f"  Auxiliary fallback: {aux_energy:.6f} J/op",
+        f"  Generation length: {args.gen_len} tokens",
+        f"  Auxiliary fallback: {aux_energy:.6f} J/op (benchmark min; mapped ops use their target energy)",
     ]
 
     grand_total = 0.0
@@ -297,35 +283,13 @@ def main():
     if decode_data:
         op_energy, op_count, total_per, aux_per = decode_data
         pri_per = total_per - aux_per
-        token_total = total_per * args.gen_len
-
-        # ---- 首 token 能耗修正（KV cache 空载，attention 范围更大）----
-        first_token_extra = 0.0
-        first_token_attn = 0.0
-        if prompt_len > 1:
-            for n in dc_nodes:
-                if n.get("op_type") != "GEMM":
-                    continue
-                # 注意力 GEMM: 输入 tensor 有 4D [B, H, 1, d] 模式
-                is_attn = False
-                for t in n.get("input_tensors", []):
-                    s = t.get("shape", [])
-                    if len(s) == 4 and s[2] == 1:
-                        is_attn = True
-                        break
-                if is_attn:
-                    e = estimate(n, db, aux_energy)
-                    first_token_attn += e
-                    # 首 token 的 attention 范围 = prompt_len（后续 token = 1）
-                    first_token_extra += e * (prompt_len - 1)
-
         token_energy_txt = [
             "=" * 70,
             "  Token-level Energy Breakdown",
             "=" * 70,
-            f"  Decode steps: {args.gen_len}  |  Prompt length: {prompt_len} tokens",
-            "",
-            f"  Operator breakdown (per token, {sum(op_count.values())} nodes):",
+            f"  Decode steps: {args.gen_len}",
+            f"  Per-token energy: {total_per:.6f}J",
+            f"  Each step executes the same operator graph ({sum(op_count.values())} nodes):",
             "",
         ]
         for op, e in sorted(op_energy.items(), key=lambda x: -x[1]):
@@ -336,33 +300,11 @@ def main():
         token_energy_txt.append(f"    {'Auxiliary':25s}  {aux_per:>8.6f}J")
         token_energy_txt.append(f"    {'Primary':25s}  {pri_per:>8.6f}J")
         token_energy_txt.append("")
-
-        if first_token_extra > 0 and args.gen_len > 1:
-            first_per = total_per + first_token_extra
-            token_energy_txt.append(f"  First-token adjustment (KV cache warmup):")
-            token_energy_txt.append(f"    Attention GEMMs ({prompt_len}× larger when cache empty): +{first_token_extra:.6f}J")
-            token_energy_txt.append(f"    Token 1: {first_per:.6f}J  |  Tokens 2~{args.gen_len}: {total_per:.6f}J/token")
-            token_energy_txt.append(f"    Total decode: {first_per + total_per * (args.gen_len - 1):.4f}J")
-            token_energy_txt.append("")
-
-        if first_token_extra > 0 and args.gen_len > 1:
-            cum = 0.0
-            token_energy_txt.append(f"  {'Token':>6s}  {'Energy(J)':>10s}  {'Aux(J)':>10s}  {'Primary(J)':>10s}  {'Cumulative(J)':>14s}")
-            token_energy_txt.append(f"  {'-'*6}  {'-'*10}  {'-'*10}  {'-'*10}  {'-'*14}")
-            for step in range(1, args.gen_len + 1):
-                e = first_per if step == 1 else total_per
-                a = aux_per
-                p = e - a
-                cum += e
-                tag = "  (warmup)" if step == 1 else ""
-                token_energy_txt.append(f"  {step:>6d}  {e:>10.6f}  {a:>10.6f}  {p:>10.6f}  {cum:>14.6f}{tag}")
-            token_energy_txt.append(f"  {'-'*6}  {'-'*10}  {'-'*10}  {'-'*10}  {'-'*14}")
-            token_energy_txt.append(f"  {'Total':>6s}  {cum:>10.6f}J")
-        else:
-            token_energy_txt.append(f"  All {args.gen_len} tokens use the same ONNX graph → identical per-token energy.")
-            token_energy_txt.append(f"  Total decode ({args.gen_len} tokens) = {total_per:.6f}J × {args.gen_len} = {token_total:.4f}J")
-            if prompt_len > 1 and first_token_extra == 0:
-                token_energy_txt.append("  (No attention GEMMs found — KV cache effect not applicable.)")
+        token_energy_txt.append(f"  Per-token energy: {total_per:.6f}J (all {args.gen_len} tokens identical)")
+        token_energy_txt.append(f"  Total decode:     {total_per * args.gen_len:.6f}J")
+        token_energy_txt.append("")
+        token_energy_txt.append("  Note: All decode tokens use the same ONNX graph traced at seq_len=1.")
+        token_energy_txt.append("  The 1st token additionally initializes KV cache from prefill (included in prefill phase).")
 
         token_text = "\n".join(token_energy_txt)
         token_path = output_path.with_name(output_path.stem + "_token_energy.txt")
