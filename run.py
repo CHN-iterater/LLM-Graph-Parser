@@ -4,7 +4,6 @@ from datetime import datetime
 from pathlib import Path
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-os.environ.setdefault("HF_HOME", "D:/Hugging Face")
 
 from llm_graph_parser import parse_model, parse_onnx
 from llm_graph_parser.hardware import HardwareProfiler
@@ -255,10 +254,10 @@ def run_pytorch_mode():
     ts_path = os.path.join(output_dir, "timestamps.txt")
 
     print(f"\n加载模型: {MODEL_SOURCE}")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE, local_files_only=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE, local_files_only=True)
     model.eval()
     print(f"  参数总量: {sum(p.numel() for p in model.parameters()):,}")
 
