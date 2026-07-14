@@ -44,15 +44,12 @@ def run_cmd(cmd: list, step_label: str, capture: bool = False) -> tuple[bool, st
 
 def _parse_energy(lines: list[str], section_start: int) -> float | None:
     """在 lines 中从 section_start 往后找 Energy: x.xxxx J。"""
+    import re
     for i in range(section_start + 1, min(section_start + 5, len(lines))):
         if "Energy:" in lines[i]:
-            parts = lines[i].split()
-            for p in parts:
-                if p.endswith("J"):
-                    try:
-                        return float(p[:-1])
-                    except ValueError:
-                        pass
+            m = re.search(r"Energy:\s+(\d+\.\d+)\s+J", lines[i])
+            if m:
+                return float(m.group(1))
     return None
 
 
@@ -125,19 +122,14 @@ def main():
             f"{model_name}: power_analyze", capture=True)
         pf2 = dc2 = None
         if ok:
+            import re
             for line in pa_out.split("\n"):
-                if "Prefill" in line and "s" in line:
-                    parts = line.strip().split()
-                    for p in parts:
-                        if p.endswith("J"):
-                            pf2 = float(p[:-1])
-                            break
-                if "Decode" in line and "s" in line:
-                    parts = line.strip().split()
-                    for p in parts:
-                        if p.endswith("J"):
-                            dc2 = float(p[:-1])
-                            break
+                m = re.search(r"Prefill.*?(\d+\.\d+)J", line)
+                if m:
+                    pf2 = float(m.group(1))
+                m = re.search(r"Decode.*?(\d+\.\d+)J", line)
+                if m:
+                    dc2 = float(m.group(1))
         else:
             results.append((model_name, "FAILED at power_analyze"))
             continue
