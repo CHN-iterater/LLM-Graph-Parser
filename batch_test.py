@@ -165,6 +165,15 @@ def main():
         results.append((model_name, "OK"))
         energy_summary[model_name] = (pf1, pf2, dc1, dc2)
 
+        # 冷却等待（让 GPU 降温后再测下一个模型）
+        if model_name != models[-1]:
+            sec = 60
+            print(f"\n  冷却 {sec}s 后进入下一个模型...")
+            for remaining in range(sec, 0, -1):
+                print(f"\r  冷却剩余: {remaining}s", end="")
+                time.sleep(1)
+            print()
+
     # 汇总
     print(f"\n{'#' * 70}")
     print(f"  Batch Test Summary")
