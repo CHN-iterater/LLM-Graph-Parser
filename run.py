@@ -405,7 +405,6 @@ def run_pytorch_mode():
     if HARDWARE_PROFILING and profiler.available:
         try:
             profiler.save_report(output_dir, name=prefix)
-            profiler.trace_to_json(output_dir, name=prefix)
         except Exception as pe:
             print(f"    [profiler] save failed: {pe}")
 
