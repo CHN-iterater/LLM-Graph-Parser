@@ -294,6 +294,14 @@ def run_pytorch_mode():
     print(f"  Prompt: \"{prompt}\"")
     print(f"  tokens: {seq_len}")
 
+    # ---- 事前空闲基线测量 ----
+    write_timestamp("idle_before_start", ts_path)
+    write_energy("idle_before_start", ts_path)
+    import time
+    time.sleep(2)
+    write_timestamp("idle_before_end", ts_path)
+    write_energy("idle_before_end", ts_path)
+
     # Step 1: Prefill
     write_timestamp("prefill_start", ts_path)
     write_energy("prefill_start", ts_path)
@@ -401,6 +409,14 @@ def run_pytorch_mode():
             profiler.trace_to_json(output_dir, name=prefix)
         except Exception as pe:
             print(f"    [profiler] save failed: {pe}")
+
+    # ---- 事后空闲基线测量 ----
+    write_timestamp("idle_after_start", ts_path)
+    write_energy("idle_after_start", ts_path)
+    import time
+    time.sleep(2)
+    write_timestamp("idle_after_end", ts_path)
+    write_energy("idle_after_end", ts_path)
 
     print("\n" + "=" * 60)
     print(text)

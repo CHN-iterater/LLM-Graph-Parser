@@ -51,7 +51,10 @@ def load_timestamps(path):
     with open(path) as f:
         for line in f:
             # 普通时间戳（格式: "HH:MM:SS.mmm tag"，用空格前缀防子串误匹配）
-            for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end", "gen_start", "gen_end", "end"):
+            for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end",
+                        "gen_start", "gen_end", "end",
+                        "idle_before_start", "idle_before_end",
+                        "idle_after_start", "idle_after_end"):
                 if f" {tag}" in line or line.startswith(tag + ":"):
                     ts[tag] = parse_ts_value(line)
             # GPU 执行时间（μs），格式: "prefill_gpu_us 12345"
@@ -60,7 +63,9 @@ def load_timestamps(path):
                     ts[tag] = int(line.strip().split()[1])
             # 硬件累计能量（J），格式: "prefill_start_energy_j 1234.56"
             for tag in ("start_energy_j", "prefill_start_energy_j", "prefill_end_energy_j",
-                        "gen_start_energy_j", "gen_end_energy_j"):
+                        "gen_start_energy_j", "gen_end_energy_j",
+                        "idle_before_start_energy_j", "idle_before_end_energy_j",
+                        "idle_after_start_energy_j", "idle_after_end_energy_j"):
                 if line.startswith(tag):
                     ts[tag] = float(line.strip().split()[1])
     return ts
@@ -91,15 +96,45 @@ def main():
     runs = max(args.runs, 1)
     gen_len = max(args.gen_len, 1)
 
-    # ---- 基准功耗扣除（GPU 0 推理，GPU 1~N-1 空载）----
-    if n_gpu >= 2:
-        baseline = powers[:, 1:].mean(axis=1)  # 每时刻 idle GPU 平均功率
-        inference_w = powers[:, 0] - baseline   # GPU 0 净推理功率
-        avg_baseline = float(baseline.mean())
-    else:
-        baseline = np.zeros(len(times))
-        inference_w = powers[:, 0] if powers.ndim > 1 else powers
-        avg_baseline = 0.0
+    # ---- 基准功耗：优先用 GPU 0 自身空闲窗口，否则用跨 GPU baseline ----
+    baseline = np.zeros(len(times))
+    inference_w = powers[:, 0] if powers.ndim > 1 else powers
+    avg_baseline = 0.0
+    idle_power_before = 0.0
+    idle_power_after = 0.0
+
+    # 硬件能量计数器路径：从 idle 窗口直接算 GPU 0 空闲功率
+    if "idle_before_end_energy_j" in ts and "idle_before_start_energy_j" in ts:
+        idle_s = ts["idle_before_end"] - ts["idle_before_start"] if "idle_before_end" in ts else 2.0
+        idle_energy = ts["idle_before_end_energy_j"] - ts["idle_before_start_energy_j"]
+        idle_power_before = idle_energy / max(idle_s, 0.1)
+        if "idle_after_end_energy_j" in ts and "idle_after_start_energy_j" in ts:
+            idle_after_s = ts["idle_after_end"] - ts["idle_after_start"] if "idle_after_end" in ts else 2.0
+            idle_after_energy = ts["idle_after_end_energy_j"] - ts["idle_after_start_energy_j"]
+            idle_power_after = idle_after_energy / max(idle_after_s, 0.1)
+        avg_baseline = idle_power_before  # 使用事前 idle 作为 baseline
+    # 功率采样路径：用跨 GPU baseline
+    elif n_gpu >= 2:
+        b = powers[:, 1:].mean(axis=1)
+        inference_w = powers[:, 0] - b
+        avg_baseline = float(b.mean())
+        # 功率采样路径的空闲窗口检测
+        if "idle_before_start" in ts and "idle_before_end" in ts:
+            m = (times >= ts["idle_before_start"]) & (times <= ts["idle_before_end"])
+            if m.any():
+                idle_power_before = float(powers[m, 0].mean())
+        if "idle_after_start" in ts and "idle_after_end" in ts:
+            m = (times >= ts["idle_after_start"]) & (times <= ts["idle_after_end"])
+            if m.any():
+                idle_power_after = float(powers[m, 0].mean())
+
+    # 空闲漂移警告
+    if idle_power_before > 0 and idle_power_after > 0:
+        drift = abs(idle_power_before - idle_power_after)
+        if drift > 3.0:
+            print(f"  ⚠ WARNING: idle power drifted {drift:.1f}W "
+                  f"({idle_power_before:.1f}W → {idle_power_after:.1f}W). "
+                  f"Baseline may be unreliable.")
 
     phases = [
         ("Prefill", "prefill_start", "prefill_end", "prefill_gpu_us"),
@@ -146,7 +181,7 @@ def main():
         print(f"[analyze] {args.timestamps}: timestamps not found")
         return
 
-    # Per-GPU average power + 基准功耗（仅 power_monitor 在运行时有效）
+    # Per-GPU average power
     t0 = ts.get("prefill_start")
     t1 = ts.get("prefill_end", ts.get("decode_end"))
     if t0 is not None and t1 is not None:
@@ -157,11 +192,16 @@ def main():
             print(f"  {'-' * 22}")
             for i in range(min(len(avg), 8)):
                 print(f"  {i:>5d}  {avg[i]:>10.2f}")
-            if n_gpu >= 2:
-                print(f"\n  Baseline (idle GPU 1~{n_gpu-1} avg): {avg_baseline:.2f} W")
-                print(f"  Inference-only (GPU 0 - baseline): {avg[0] - avg_baseline:.2f} W")
-        else:
-            print("  [power.txt: no samples in prefill window — run power_monitor.py for per-GPU display]")
+        # 基准功耗说明
+    baseline_src = ""
+    if "idle_before_end_energy_j" in ts:
+        baseline_src = f" (self-idle: GPU 0 idle_before={idle_power_before:.1f}W"
+        if idle_power_after > 0:
+            baseline_src += f", idle_after={idle_power_after:.1f}W"
+        baseline_src += ")"
+    elif n_gpu >= 2:
+        baseline_src = f" (cross-GPU: idle GPU 1~{n_gpu-1} avg)"
+    print(f"  Baseline: {avg_baseline:.2f}W{baseline_src}")
 
     # Phase summary (per-run)
     print(f"\n  (除以 {runs} 次 profiling runs，以下为单次推理结果)")
