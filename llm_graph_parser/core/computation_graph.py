@@ -1,7 +1,7 @@
 """Computation graph (DAG) construction and analysis."""
 
 from __future__ import annotations
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Optional
 
@@ -163,14 +163,18 @@ class ComputationGraph:
     def print_layer_report(self) -> None:
         print(self.layer_report_text())
 
-    def save_layer_report(self, output_dir: str | Path, name: str = '') -> Path:
+    def _save_report(self, output_dir: str | Path, suffix: str, content: str,
+                      name: str = '') -> Path:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         stem = f"{name}_" if name else ""
-        path = output_dir / f"{stem}layer_report.txt"
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(self.layer_report_text())
+        path = output_dir / f"{stem}{suffix}.txt"
+        path.write_text(content, encoding='utf-8')
         return path
+
+    def save_layer_report(self, output_dir: str | Path, name: str = '') -> Path:
+        return self._save_report(output_dir, 'layer_report',
+                                 self.layer_report_text(), name)
 
     def get_operator_counts(self) -> dict[str, int]:
         """Count occurrences of each operator type."""
@@ -194,11 +198,11 @@ class ComputationGraph:
             for cid in node.children:
                 in_degree[cid] = in_degree.get(cid, 0) + 1
 
-        queue = [nid for nid, deg in in_degree.items() if deg == 0]
+        queue = deque(nid for nid, deg in in_degree.items() if deg == 0)
         sorted_nodes = []
 
         while queue:
-            nid = queue.pop(0)
+            nid = queue.popleft()
             sorted_nodes.append(self._nodes[nid])
             for cid in self._nodes[nid].children:
                 in_degree[cid] -= 1
@@ -212,26 +216,7 @@ class ComputationGraph:
 
     def print_summary(self) -> None:
         """Print a human-readable summary of the computation graph."""
-        print(f"Model: {self.model_name}")
-        if self.prompt_text:
-            print(f"Prompt: \"{self.prompt_text}\"")
-        if self.prompt_tokens:
-            print(f"Prompt tokens: {self.prompt_tokens}")
-        print(f"Total operator nodes: {self.num_nodes}")
-        print()
-
-        layers = self.get_layers()
-        print(f"Layers ({len(layers)}):")
-        for layer_id in layers:
-            layer_nodes = self.get_layer_nodes(layer_id)
-            print(f"  {layer_id}: {len(layer_nodes)} ops")
-
-        print()
-        print("Operator counts:")
-        for op_type, count in sorted(
-            self.get_operator_counts().items(), key=lambda x: -x[1]
-        ):
-            print(f"  {op_type:25s}: {count}")
+        print(self.summary_text())
 
     def summary_text(self) -> str:
         """Return a complete human-readable summary as text (for saving)."""
@@ -287,13 +272,14 @@ class ComputationGraph:
                 indeg[cid] = indeg.get(cid, 0) + 1
 
         level: dict[str, int] = {}
-        queue = [n.op_id for n in order if indeg.get(n.op_id, 0) == 0]
+        init_queue = [n.op_id for n in order if indeg.get(n.op_id, 0) == 0]
+        queue = deque(init_queue)
 
-        for nid in queue:
+        for nid in init_queue:
             level[nid] = 0
 
         while queue:
-            nid = queue.pop(0)
+            nid = queue.popleft()
             node = self._nodes[nid]
             w = 1
             if weight_attr == "flops":
@@ -503,22 +489,8 @@ class ComputationGraph:
         print(self.parallelism_report()["text"])
 
     def save_parallelism_report(self, output_dir: str | Path, name: str = "") -> Path:
-        """Save the parallelism analysis report to a text file.
-
-        Args:
-            output_dir: Output directory.
-            name: Optional filename stem. Defaults to ``"parallel"``.
-
-        Returns:
-            Path to the saved report file.
-        """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{name}_" if name else ""
-        path = output_dir / f"{stem}parallel_report.txt"
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(self.parallelism_report()["text"])
-        return path
+        return self._save_report(output_dir, 'parallel_report',
+                                 self.parallelism_report()["text"], name)
 
     # ------------------------------------------------------------------
     # KV Cache cross-input dependency
@@ -618,15 +590,8 @@ class ComputationGraph:
 
     def save_kv_cache_report(self, output_dir: str | Path, name: str = "",
                               num_decode_tokens: int = 0) -> Path:
-        """保存 KV cache 跨输入依赖分析报告。"""
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{name}_" if name else ""
-        path = output_dir / f"{stem}kvcache_report.txt"
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(self.kv_cache_analysis(
-                num_decode_tokens=num_decode_tokens)["text"])
-        return path
+        return self._save_report(output_dir, 'kvcache_report',
+                                 self.kv_cache_analysis(num_decode_tokens=num_decode_tokens)["text"], name)
 
     def tag_unassigned_as(self, stage: str) -> None:
         """Set stage for all nodes that still have ``"unknown"`` stage."""
@@ -783,23 +748,8 @@ class ComputationGraph:
 
     def save_phase_report(self, output_dir: str | Path, name: str = "",
                           hardware_profile: Optional[dict] = None) -> Path:
-        """Save the phase comparison report to a text file.
-
-        Args:
-            output_dir: Output directory.
-            name: Optional filename stem. Defaults to ``"phase"``.
-            hardware_profile: Optional hardware spec dict for roofline analysis.
-
-        Returns:
-            Path to the saved report file.
-        """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{name}_" if name else ""
-        path = output_dir / f"{stem}phase_report.txt"
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(self.stage_comparison_text(hardware_profile=hardware_profile))
-        return path
+        return self._save_report(output_dir, 'phase_report',
+                                 self.stage_comparison_text(hardware_profile=hardware_profile), name)
 
     def save_to_json(self, output_dir: str | Path,
                      registry: OperatorRegistry | None = None,
@@ -813,13 +763,7 @@ class ComputationGraph:
 
     def save_summary(self, output_dir: str | Path,
                      name: str = "") -> Path:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{name}_" if name else ""
-        path = output_dir / f"{stem}summary.txt"
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(self.summary_text())
-        return path
+        return self._save_report(output_dir, 'summary', self.summary_text(), name)
 
     def to_dict(self) -> dict:
         """Export the graph as a serializable dictionary (legacy, prefer save_to_json)."""

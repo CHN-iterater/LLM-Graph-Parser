@@ -40,18 +40,10 @@ def estimate_memory_bytes(op_type: str,
     """
     op = op_type.upper()
 
-    if op == "LINEAR":
-        return _linear_memory(inputs, outputs)
-    elif op in ("GEMM", "BMM"):
-        return _matmul_memory(inputs, outputs)
-    elif op in ("ATTENTION", "FLASH_ATTENTION"):
-        return _attention_memory(inputs, outputs)
-    elif op in ("LAYER_NORM", "RMS_NORM"):
-        return _norm_memory(inputs, outputs)
-    elif op in ("SILU", "GELU", "RELU", "SIGMOID", "SOFTMAX"):
-        return _elementwise_memory(inputs, outputs)
-    elif op == "ADD":
-        return _elementwise_memory(inputs, outputs)
+    if op in ("LINEAR", "GEMM", "BMM", "ATTENTION", "FLASH_ATTENTION",
+              "LAYER_NORM", "RMS_NORM", "SILU", "GELU", "RELU", "SIGMOID",
+              "SOFTMAX", "ADD"):
+        return _io_memory(inputs, outputs)
     elif op == "EMBEDDING":
         return 0
     elif op in ("RESHAPE", "VIEW", "TRANSPOSE", "PERMUTE", "SLICE", "EXPAND",
@@ -73,48 +65,7 @@ def estimate_memory_bytes(op_type: str,
         return total
 
 
-def _linear_memory(inputs: list[TensorMeta],
-                   outputs: list[TensorMeta]) -> int:
-    total = 0
-    for t in inputs:
-        total += _numel(t.shape) * _dtype_bytes(t.dtype)
-    for t in outputs:
-        total += _numel(t.shape) * _dtype_bytes(t.dtype)
-    return total
-
-
-def _matmul_memory(inputs: list[TensorMeta],
-                   outputs: list[TensorMeta]) -> int:
-    total = 0
-    for t in inputs:
-        total += _numel(t.shape) * _dtype_bytes(t.dtype)
-    for t in outputs:
-        total += _numel(t.shape) * _dtype_bytes(t.dtype)
-    return total
-
-
-def _attention_memory(inputs: list[TensorMeta],
-                      outputs: list[TensorMeta]) -> int:
-    total = 0
-    for t in inputs:
-        total += _numel(t.shape) * _dtype_bytes(t.dtype)
-    for t in outputs:
-        total += _numel(t.shape) * _dtype_bytes(t.dtype)
-    return total
-
-
-def _norm_memory(inputs: list[TensorMeta],
-                 outputs: list[TensorMeta]) -> int:
-    total = 0
-    for t in inputs:
-        total += _numel(t.shape) * _dtype_bytes(t.dtype)
-    for t in outputs:
-        total += _numel(t.shape) * _dtype_bytes(t.dtype)
-    return total
-
-
-def _elementwise_memory(inputs: list[TensorMeta],
-                        outputs: list[TensorMeta]) -> int:
+def _io_memory(inputs, outputs):
     total = 0
     for t in inputs:
         total += _numel(t.shape) * _dtype_bytes(t.dtype)
