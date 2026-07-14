@@ -253,6 +253,13 @@ def run_pytorch_mode():
     output_dir = make_output_dir(model_label)
     ts_path = os.path.join(output_dir, "timestamps.txt")
 
+    # 在 CUDA 初始化前测量 GPU 0 真实空闲功率
+    write_timestamp("idle_before_start", ts_path)
+    write_energy("idle_before_start", ts_path)
+    import time; time.sleep(2)
+    write_timestamp("idle_before_end", ts_path)
+    write_energy("idle_before_end", ts_path)
+
     print(f"\n加载模型: {MODEL_SOURCE}")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE, local_files_only=True)
     if tokenizer.pad_token is None:
@@ -293,14 +300,6 @@ def run_pytorch_mode():
     write_energy("start", ts_path)
     print(f"  Prompt: \"{prompt}\"")
     print(f"  tokens: {seq_len}")
-
-    # ---- 事前空闲基线测量 ----
-    write_timestamp("idle_before_start", ts_path)
-    write_energy("idle_before_start", ts_path)
-    import time
-    time.sleep(2)
-    write_timestamp("idle_before_end", ts_path)
-    write_energy("idle_before_end", ts_path)
 
     # Step 1: Prefill
     write_timestamp("prefill_start", ts_path)

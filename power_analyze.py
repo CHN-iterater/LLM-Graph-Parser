@@ -96,29 +96,28 @@ def main():
     runs = max(args.runs, 1)
     gen_len = max(args.gen_len, 1)
 
-    # ---- 基准功耗：优先用 GPU 0 自身空闲窗口，否则用跨 GPU baseline ----
+    # ---- 基准功耗：GPU 0 自身空闲功率（在 CUDA 初始化前测量，排除 CUDA context 干扰）----
     baseline = np.zeros(len(times))
     inference_w = powers[:, 0] if powers.ndim > 1 else powers
     avg_baseline = 0.0
     idle_power_before = 0.0
     idle_power_after = 0.0
 
-    # 硬件能量计数器路径：从 idle 窗口直接算 GPU 0 空闲功率
     if "idle_before_end_energy_j" in ts and "idle_before_start_energy_j" in ts:
         idle_s = ts["idle_before_end"] - ts["idle_before_start"] if "idle_before_end" in ts else 2.0
         idle_energy = ts["idle_before_end_energy_j"] - ts["idle_before_start_energy_j"]
         idle_power_before = idle_energy / max(idle_s, 0.1)
+        avg_baseline = idle_power_before
         if "idle_after_end_energy_j" in ts and "idle_after_start_energy_j" in ts:
             idle_after_s = ts["idle_after_end"] - ts["idle_after_start"] if "idle_after_end" in ts else 2.0
             idle_after_energy = ts["idle_after_end_energy_j"] - ts["idle_after_start_energy_j"]
             idle_power_after = idle_after_energy / max(idle_after_s, 0.1)
-        avg_baseline = idle_power_before  # 使用事前 idle 作为 baseline
-    # 功率采样路径：用跨 GPU baseline
+    # 功率采样路径回退：跨 GPU baseline
     elif n_gpu >= 2:
         b = powers[:, 1:].mean(axis=1)
         inference_w = powers[:, 0] - b
         avg_baseline = float(b.mean())
-        # 功率采样路径的空闲窗口检测
+        # 尝试从功率采样中提取 GPU 0 空闲窗口
         if "idle_before_start" in ts and "idle_before_end" in ts:
             m = (times >= ts["idle_before_start"]) & (times <= ts["idle_before_end"])
             if m.any():
@@ -128,13 +127,15 @@ def main():
             if m.any():
                 idle_power_after = float(powers[m, 0].mean())
 
-    # 空闲漂移警告
+    baseline_src = f" (GPU 0 self-idle: {avg_baseline:.1f}W)"
+
+    # 空闲漂移警告 — GPU 0 事后 idle（含 CUDA context）与事前 true idle 的差异
     if idle_power_before > 0 and idle_power_after > 0:
-        drift = abs(idle_power_before - idle_power_after)
-        if drift > 3.0:
-            print(f"  ⚠ WARNING: idle power drifted {drift:.1f}W "
-                  f"({idle_power_before:.1f}W → {idle_power_after:.1f}W). "
-                  f"Baseline may be unreliable.")
+        drift = idle_power_after - idle_power_before
+        pct = drift / idle_power_before * 100
+        print(f"  CUDA overhead: {idle_power_before:.1f}W (true idle) → {idle_power_after:.1f}W (after inference, +{drift:.1f}W)")
+        if abs(drift) > 5:
+            print(f"  ⚠ CUDA overhead changed by {drift:.1f}W ({pct:.1f}%) — baseline uncertainty ~{abs(drift)/2:.1f}W")
 
     phases = [
         ("Prefill", "prefill_start", "prefill_end", "prefill_gpu_us"),
@@ -193,14 +194,6 @@ def main():
             for i in range(min(len(avg), 8)):
                 print(f"  {i:>5d}  {avg[i]:>10.2f}")
         # 基准功耗说明
-    baseline_src = ""
-    if "idle_before_end_energy_j" in ts:
-        baseline_src = f" (self-idle: GPU 0 idle_before={idle_power_before:.1f}W"
-        if idle_power_after > 0:
-            baseline_src += f", idle_after={idle_power_after:.1f}W"
-        baseline_src += ")"
-    elif n_gpu >= 2:
-        baseline_src = f" (cross-GPU: idle GPU 1~{n_gpu-1} avg)"
     print(f"  Baseline: {avg_baseline:.2f}W{baseline_src}")
 
     # Phase summary (per-run)
