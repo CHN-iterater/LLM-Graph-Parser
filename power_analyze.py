@@ -182,28 +182,12 @@ def main():
     for name, d, e, w in results:
         label = f"{name} (per token)" if (name == "Decode" and gen_len > 1) else name
         print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
-    # 算子 vs 框架开销分解
-    has_gpu_data = any(t in ts for t in ("prefill_gpu_us", "decode_gpu_us"))
-    if has_gpu_data and n_gpu >= 2:
-        print(f"\n  [算子 vs 框架开销分解] (按 GPU busy/wall 比例折算)")
-        for name, s, e, gpu_tag in phases:
-            if s in ts and e in ts and gpu_tag in ts:
-                energy_tag_s = f"{s}_energy_j"
-                energy_tag_e = f"{e}_energy_j"
-                if energy_tag_s in ts and energy_tag_e in ts:
-                    total_ej = ts[energy_tag_e] - ts[energy_tag_s]
-                    total_ej -= avg_baseline * (ts[e] - ts[s])  # 扣除空闲基准
-                else:
-                    total_ej, _ = integrate(times, inference_w, ts[s], ts[e])
-                gpu_s = ts[gpu_tag] / 1e6
-                wall_s = ts[e] - ts[s]
-                ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
-                div = gen_len if name == "Decode" else 1
-                op = total_ej * ratio / runs / div
-                fw = total_ej * (1 - ratio) / runs / div
-                per = " (per token)" if div > 1 else ""
-                print(f"  {name:15s}{per}  operator={op:.2f}J  framework={fw:.2f}J  total={total_ej/runs/div:.2f}J")
-                print(f"  {'':15s}  GPU busy={gpu_s*1000:.0f}/{wall_s*1000:.0f}ms ({ratio*100:.1f}%)")
+    # 空闲功耗信息展示
+    if idle_before > 0 and idle_after > 0:
+        print(f"\n  [功耗基线]")
+        print(f"  GPU 0 idle before:  {idle_before:.1f}W")
+        print(f"  GPU 0 idle after:   {idle_after:.1f}W")
+        print(f"  used baseline:      {avg_baseline:.1f}W")
 
     if len(results) >= 2:
         td = sum(r[1] for r in results)
