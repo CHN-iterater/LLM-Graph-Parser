@@ -54,7 +54,8 @@ def load_timestamps(path):
             for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end",
                         "gen_start", "gen_end", "end",
                         "idle_before_start", "idle_before_end",
-                        "idle_after_start", "idle_after_end"):
+                        "idle_after_start", "idle_after_end",
+                        "idle_cuda_start", "idle_cuda_end"):
                 if f" {tag}" in line or line.startswith(tag + ":"):
                     ts[tag] = parse_ts_value(line)
             # GPU 执行时间（μs），格式: "prefill_gpu_us 12345"
@@ -65,7 +66,8 @@ def load_timestamps(path):
             for tag in ("start_energy_j", "prefill_start_energy_j", "prefill_end_energy_j",
                         "gen_start_energy_j", "gen_end_energy_j",
                         "idle_before_start_energy_j", "idle_before_end_energy_j",
-                        "idle_after_start_energy_j", "idle_after_end_energy_j"):
+                        "idle_after_start_energy_j", "idle_after_end_energy_j",
+                        "idle_cuda_start_energy_j", "idle_cuda_end_energy_j"):
                 if line.startswith(tag):
                     ts[tag] = float(line.strip().split()[1])
     return ts
@@ -96,86 +98,78 @@ def main():
     runs = max(args.runs, 1)
     gen_len = max(args.gen_len, 1)
 
-    # ---- 基准功耗：GPU 0 自身空闲功率（在 CUDA 初始化前测量，排除 CUDA context 干扰）----
+    # ---- 基准功耗：GPU 0 + CUDA context 下的空闲功率（模型加载后测量，包含 CUDA overhead）----
     baseline = np.zeros(len(times))
     inference_w = powers[:, 0] if powers.ndim > 1 else powers
     avg_baseline = 0.0
-    idle_power_before = 0.0
-    idle_power_after = 0.0
+    idle_before = 0.0
+    idle_after = 0.0
+    idle_cuda = 0.0
 
-    if "idle_before_end_energy_j" in ts and "idle_before_start_energy_j" in ts:
-        idle_s = ts["idle_before_end"] - ts["idle_before_start"] if "idle_before_end" in ts else 2.0
-        idle_energy = ts["idle_before_end_energy_j"] - ts["idle_before_start_energy_j"]
-        idle_power_before = idle_energy / max(idle_s, 0.1)
-        avg_baseline = idle_power_before
-        if "idle_after_end_energy_j" in ts and "idle_after_start_energy_j" in ts:
-            idle_after_s = ts["idle_after_end"] - ts["idle_after_start"] if "idle_after_end" in ts else 2.0
-            idle_after_energy = ts["idle_after_end_energy_j"] - ts["idle_after_start_energy_j"]
-            idle_power_after = idle_after_energy / max(idle_after_s, 0.1)
-    # 功率采样路径回退：跨 GPU baseline
+    # 硬件能量计数器路径：CUDA 下空闲功率
+    if "idle_cuda_end_energy_j" in ts and "idle_cuda_start_energy_j" in ts:
+        cuda_s = ts["idle_cuda_end"] - ts["idle_cuda_start"] if "idle_cuda_end" in ts else 2.0
+        cuda_e = ts["idle_cuda_end_energy_j"] - ts["idle_cuda_start_energy_j"]
+        idle_cuda = cuda_e / max(cuda_s, 0.1)
+        avg_baseline = idle_cuda
+        # 漂移检测
+        if "idle_before_end_energy_j" in ts:
+            bs = ts["idle_before_end"] - ts["idle_before_start"]
+            be = ts["idle_before_end_energy_j"] - ts["idle_before_start_energy_j"]
+            idle_before = be / max(bs, 0.1)
+        if "idle_after_end_energy_j" in ts:
+            a_s = ts["idle_after_end"] - ts["idle_after_start"]
+            a_e = ts["idle_after_end_energy_j"] - ts["idle_after_start_energy_j"]
+            idle_after = a_e / max(a_s, 0.1)
+    # 功率采样路径回退：用 idle_cuda 时间戳取功率均值
+    elif "idle_cuda_start" in ts and "idle_cuda_end" in ts:
+        m = (times >= ts["idle_cuda_start"]) & (times <= ts["idle_cuda_end"])
+        if m.any():
+            idle_cuda = float(powers[m, 0].mean())
+            avg_baseline = idle_cuda
+    # 最终回退：跨 GPU baseline
     elif n_gpu >= 2:
         b = powers[:, 1:].mean(axis=1)
         inference_w = powers[:, 0] - b
         avg_baseline = float(b.mean())
-        # 尝试从功率采样中提取 GPU 0 空闲窗口
-        if "idle_before_start" in ts and "idle_before_end" in ts:
-            m = (times >= ts["idle_before_start"]) & (times <= ts["idle_before_end"])
-            if m.any():
-                idle_power_before = float(powers[m, 0].mean())
-        if "idle_after_start" in ts and "idle_after_end" in ts:
-            m = (times >= ts["idle_after_start"]) & (times <= ts["idle_after_end"])
-            if m.any():
-                idle_power_after = float(powers[m, 0].mean())
 
-    baseline_src = f" (GPU 0 self-idle: {avg_baseline:.1f}W)"
-
-    # 空闲漂移警告 — GPU 0 事后 idle（含 CUDA context）与事前 true idle 的差异
-    if idle_power_before > 0 and idle_power_after > 0:
-        drift = idle_power_after - idle_power_before
-        pct = drift / idle_power_before * 100
-        print(f"  CUDA overhead: {idle_power_before:.1f}W (true idle) → {idle_power_after:.1f}W (after inference, +{drift:.1f}W)")
+    bs = f" (GPU 0 + CUDA idle: {avg_baseline:.1f}W)"
+    if idle_before > 0 and idle_after > 0:
+        drift = idle_after - idle_before
+        print(f"  CUDA context overhead: {idle_before:.1f}W → {idle_after:.1f}W (+{drift:.1f}W)")
         if abs(drift) > 5:
-            print(f"  ⚠ CUDA overhead changed by {drift:.1f}W ({pct:.1f}%) — baseline uncertainty ~{abs(drift)/2:.1f}W")
+            print(f"  ⚠ WARNING: CUDA overhead drifted {drift:.1f}W — baseline uncertainty ±{abs(drift)/2:.1f}W")
 
+    # ---- 阶段积分：直接用 E_total - P_baseline × wall，不依赖 GPU 比例 ----
     phases = [
-        ("Prefill", "prefill_start", "prefill_end", "prefill_gpu_us"),
-        ("Decode", "gen_start", "gen_end", "decode_gpu_us"),
+        ("Prefill", "prefill_start", "prefill_end"),
+        ("Decode", "gen_start", "gen_end"),
     ]
     results = []
-    for name, s, e, gpu_tag in phases:
+    for name, s, e in phases:
         if s not in ts or e not in ts:
             continue
 
-        wall_s = ts[e] - ts[s]  # total wall time for all runs
+        wall_s = ts[e] - ts[s]
 
-        # — 总能耗（硬件计数器优先，功率积分回退）—
         energy_tag_s = f"{s}_energy_j"
         energy_tag_e = f"{e}_energy_j"
         if energy_tag_s in ts and energy_tag_e in ts:
             e_j_all = ts[energy_tag_e] - ts[energy_tag_s]
-            # 硬件计数器读的是 GPU 0 原始累计能耗，扣除空闲基准
-            e_j_dynamic = e_j_all - avg_baseline * wall_s if n_gpu >= 2 else e_j_all
+            e_j = (e_j_all - avg_baseline * wall_s) / runs
         else:
-            # 功率积分法已通过 inference_w 扣除过基准
-            e_j_dynamic, _ = integrate(times, inference_w, ts[s], ts[e])
+            e_j_total, _ = integrate(times, inference_w, ts[s], ts[e])
+            e_j = e_j_total / runs
 
-        # — GPU 活跃比例 → 算子能耗 —
-        if gpu_tag in ts:
-            gpu_s = ts[gpu_tag] / 1e6
-            ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
-        else:
-            ratio = 1.0
-        e_j_ops = e_j_dynamic * ratio / runs  # 算子纯净能耗（单次）
+        avg_power = e_j / (wall_s / runs if wall_s > 0 else 1)
 
-        # — 对齐口径 —
-        avg_power = (e_j_dynamic / runs) / (wall_s if wall_s > 0 else 1)
         if name == "Decode":
-            e_j_ops /= gen_len
+            e_j /= gen_len
             wall_s /= gen_len
 
-        results.append((name, wall_s, e_j_ops, avg_power))
+        results.append((name, wall_s, e_j, avg_power))
 
-    use_ec = any(f"{p[1]}_energy_j" in ts for p in phases)
+    use_ec = "idle_cuda_end_energy_j" in ts
     print(f"  Energy source: {'hardware energy counter' if use_ec else 'power sampling + integration'}")
 
     if not results:
@@ -194,7 +188,7 @@ def main():
             for i in range(min(len(avg), 8)):
                 print(f"  {i:>5d}  {avg[i]:>10.2f}")
         # 基准功耗说明
-    print(f"  Baseline: {avg_baseline:.2f}W{baseline_src}")
+    print(f"  Baseline (GPU 0 + CUDA): {avg_baseline:.2f}W")
 
     # Phase summary (per-run)
     print(f"\n  (除以 {runs} 次 profiling runs，以下为单次推理结果)")
@@ -203,28 +197,12 @@ def main():
     for name, d, e, w in results:
         label = f"{name} (per token)" if (name == "Decode" and gen_len > 1) else name
         print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
-    # 算子 vs 框架开销分解
-    has_gpu_data = any(t in ts for t in ("prefill_gpu_us", "decode_gpu_us"))
-    if has_gpu_data and n_gpu >= 2:
-        print(f"\n  [算子 vs 框架开销分解] (按 GPU busy/wall 比例折算)")
-        for name, s, e, gpu_tag in phases:
-            if s in ts and e in ts and gpu_tag in ts:
-                energy_tag_s = f"{s}_energy_j"
-                energy_tag_e = f"{e}_energy_j"
-                if energy_tag_s in ts and energy_tag_e in ts:
-                    total_ej = ts[energy_tag_e] - ts[energy_tag_s]
-                    total_ej -= avg_baseline * (ts[e] - ts[s])  # 扣除空闲基准
-                else:
-                    total_ej, _ = integrate(times, inference_w, ts[s], ts[e])
-                gpu_s = ts[gpu_tag] / 1e6
-                wall_s = ts[e] - ts[s]
-                ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
-                div = gen_len if name == "Decode" else 1
-                op = total_ej * ratio / runs / div
-                fw = total_ej * (1 - ratio) / runs / div
-                per = " (per token)" if div > 1 else ""
-                print(f"  {name:15s}{per}  operator={op:.2f}J  framework={fw:.2f}J  total={total_ej/runs/div:.2f}J")
-                print(f"  {'':15s}  GPU busy={gpu_s*1000:.0f}/{wall_s*1000:.0f}ms ({ratio*100:.1f}%)")
+    # CUDA overhead 信息展示
+    if idle_before > 0 and idle_cuda > 0:
+        print(f"\n  [功耗分解]")
+        print(f"  GPU 0 true idle:     {idle_before:.1f}W  (no CUDA context)")
+        print(f"  GPU 0 + CUDA idle:   {idle_cuda:.1f}W  (CUDA overhead = {idle_cuda - idle_before:.1f}W)")
+        print(f"  Inference baseline:  {avg_baseline:.1f}W  (subtracted from E_total)")
 
     if len(results) >= 2:
         td = sum(r[1] for r in results)
