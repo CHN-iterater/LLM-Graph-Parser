@@ -140,11 +140,10 @@ def main():
         if abs(drift) > 5:
             print(f"  ⚠ WARNING: CUDA overhead drifted {drift:.1f}W — baseline uncertainty ±{abs(drift)/2:.1f}W")
 
-    # ---- 阶段积分：E_total - P_idle_cuda × wall，再按 GPU 活跃比例折算 ----
-    gpu_tags = {"Prefill": "prefill_gpu_us", "Decode": "decode_gpu_us"}
+    # ---- 阶段积分：直接用 E_total - P_baseline × wall，不依赖 GPU 比例 ----
     phases = [
         ("Prefill", "prefill_start", "prefill_end"),
-        ("Decode", "decode_start", "decode_end"),
+        ("Decode", "gen_start", "gen_end"),
     ]
     results = []
     for name, s, e in phases:
@@ -152,22 +151,15 @@ def main():
             continue
 
         wall_s = ts[e] - ts[s]
-        gpu_tag = gpu_tags.get(name)
 
         energy_tag_s = f"{s}_energy_j"
         energy_tag_e = f"{e}_energy_j"
         if energy_tag_s in ts and energy_tag_e in ts:
             e_j_all = ts[energy_tag_e] - ts[energy_tag_s]
-            e_j_dynamic = e_j_all - avg_baseline * wall_s
+            e_j = (e_j_all - avg_baseline * wall_s) / runs
         else:
-            e_j_dynamic, _ = integrate(times, inference_w, ts[s], ts[e])
-
-        if gpu_tag in ts:
-            gpu_s = ts[gpu_tag] / 1e6
-            ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
-        else:
-            ratio = 1.0
-        e_j = e_j_dynamic * ratio / runs
+            e_j_total, _ = integrate(times, inference_w, ts[s], ts[e])
+            e_j = e_j_total / runs
 
         avg_power = e_j / (wall_s / runs if wall_s > 0 else 1)
 
