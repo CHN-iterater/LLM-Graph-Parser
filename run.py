@@ -350,6 +350,10 @@ def run_pytorch_mode():
     # Step 2: Decode — 单 token 前向能耗测量（多次 forward 取平均）
     decode_token = prompt_ids[:, -1:]
     decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
+    if HARDWARE_PROFILING and profiler.available:
+        with torch.no_grad():
+            _ = model(decode_token)
+        torch.cuda.synchronize()
     write_timestamp("decode_start", ts_path)
     write_energy("decode_start", ts_path)
     if HARDWARE_PROFILING and profiler.available:
