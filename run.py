@@ -340,6 +340,13 @@ def run_pytorch_mode():
     write_energy("prefill_end", ts_path)
     write_timestamp("prefill_end", ts_path)
 
+    # 冷却 10s，让 GPU 温度在 decode 测量前回落到接近 idle
+    if HARDWARE_PROFILING and profiler.available:
+        print(f"  [cooling] 10s...", end=" ", flush=True)
+        time.sleep(10)
+        torch.cuda.synchronize()
+        print(f"done")
+
     # Step 2: Decode — 单 token 前向能耗测量（多次 forward 取平均）
     decode_token = prompt_ids[:, -1:]
     decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
