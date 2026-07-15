@@ -330,23 +330,30 @@ def run_pytorch_mode():
 
     # Step 2: Decode
     write_timestamp("decode_start", ts_path)
+    write_energy("decode_start", ts_path)
     print(f"  [Phase 2/3] Decode (1 token)")
     decode_token = prompt_ids[:, -1:]
+    if HARDWARE_PROFILING and profiler.available:
+        _ = profiler.time_forward(model, decode_token, label="decode", num_runs=PROFILING_RUNS)
     decode_graph = parse_model(model, decode_token, model_name=model_label, onnx_path="")
     decode_graph.prompt_tokens = 1
     decode_graph.tag_unassigned_as("decode")
     dc = decode_graph.get_stage_stats("decode")
     dc_flops_per = dc["total_flops"]
     print(f"    per-step: ops={dc['num_ops']}, FLOPs={dc_flops_per/1e6:.2f}M, AI={dc['arith_intensity']:.2f}")
+    if HARDWARE_PROFILING and profiler.available:
+        total_dc_gpu_us = profiler._decode_total_us * PROFILING_RUNS
+        print(f"    time={profiler._decode_total_us/1000:.2f}ms (per run), total GPU time={total_dc_gpu_us/1000:.2f}ms")
+        with open(ts_path, "a") as tf:
+            tf.write(f"decode_gpu_us {int(total_dc_gpu_us)}\n")
+    write_energy("decode_end", ts_path)
     write_timestamp("decode_end", ts_path)
 
-    # Step 3: Generation
+    # Step 3: Generation（仅输出文本，不参与能耗统计）
     if SKIP_GENERATION:
         gen_len, answer = 0, ""
         print(f"  [Phase 3/3] Skipped (SKIP_GENERATION=True)")
     else:
-        write_timestamp("gen_start", ts_path)
-        write_energy("gen_start", ts_path)
         print(f"  [Phase 3/3] Generating (max {MAX_NEW_TOKENS})...")
         with torch.no_grad():
             kw = dict(max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
@@ -367,11 +374,6 @@ def run_pytorch_mode():
                 _ = profiler.time_generate(model, prompt_ids, num_runs=PROFILING_RUNS, **kw)
             except Exception as pe:
                 print(f"    [profiler] trace failed: {pe}")
-        total_dc_gpu_us = profiler._decode_total_us * PROFILING_RUNS
-        with open(ts_path, "a") as tf:
-            tf.write(f"decode_gpu_us {int(total_dc_gpu_us)}\n")
-        write_energy("gen_end", ts_path)
-        write_timestamp("gen_end", ts_path)
 
     # ---- Layer partitioner ----
     for g in (prefill_graph, decode_graph):
