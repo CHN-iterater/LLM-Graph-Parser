@@ -110,12 +110,14 @@ def main():
         wall_s = ts[e] - ts[s]
 
         # 基线 = 阶段起止时刻 GPU 0 瞬时功率的均值
-        def _p(t_sec):
-            if len(times) == 0:
-                return 0.0
-            idx = np.argmin(np.abs(times - t_sec))
-            return float(powers[idx, 0])
-        P_bl = (_p(ts[s]) + _p(ts[e])) / 2.0
+        # 基线：窗口内全部功率样本的均值
+        mask = (times >= ts[s]) & (times <= ts[e])
+        if mask.any():
+            P_bl = float(powers[mask, 0].mean())
+        elif idle_before > 0:
+            P_bl = idle_before
+        else:
+            P_bl = 0.0
 
         energy_tag_s = f"{s}_energy_j"
         energy_tag_e = f"{e}_energy_j"
@@ -123,15 +125,16 @@ def main():
             e_j_all = ts[energy_tag_e] - ts[energy_tag_s]
             e_j_dynamic = e_j_all - P_bl * wall_s
         else:
-            e_j_dynamic, _ = integrate(times, powers[:, 0] - P_bl, ts[s], ts[e])
+            e_j_all = e_j_dynamic = 0.0
 
-        # GPU_busy 比例压缩 → 排除框架开销
+        # GPU_busy 比例
         gpu_us_tag = {"Prefill": "prefill_gpu_us", "Decode": "decode_gpu_us"}[name]
         if gpu_us_tag in ts:
             gpu_s = ts[gpu_us_tag] / 1e6
             ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
         else:
             ratio = 1.0
+
         e_j_op = e_j_dynamic * ratio
 
         avg_power = e_j_dynamic / wall_s if wall_s > 0 else 0
