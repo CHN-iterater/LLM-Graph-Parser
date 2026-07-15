@@ -109,6 +109,7 @@ def main():
     avg_baseline = sum(candidates) / len(candidates) if candidates else idle_before
     src = f" ({[n for n, v in [('idle_cuda',idle_cuda),('idle_after',idle_after)] if v>0]})"
 
+    gpu_tag_map = {"Prefill": "prefill_gpu_us", "Decode": "decode_gpu_us"}
     phases = [("Prefill", "prefill_start", "prefill_end"), ("Decode", "gen_start", "gen_end")]
     results = []
     for name, s, e in phases:
@@ -125,8 +126,15 @@ def main():
         else:
             e_j_dynamic, _ = integrate(times, powers[:, 0], ts[s], ts[e])
 
+        e_j_op = e_j_dynamic  # operator + framework total
+        gpu_us_tag = gpu_tag_map[name]
+        if gpu_us_tag in ts:
+            gpu_s = ts[gpu_us_tag] / 1e6
+            ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
+            e_j_op = e_j_dynamic * ratio  # operator only
+
         avg_power = e_j_dynamic / wall_s if wall_s > 0 else 0
-        e_j = e_j_dynamic / runs
+        e_j = e_j_op / runs
 
         if name == "Decode":
             e_j /= gen_len
