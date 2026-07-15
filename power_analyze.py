@@ -151,7 +151,7 @@ def main():
             e_j /= gen_len
             wall_s /= gen_len
 
-        results.append((name, wall_s, e_j_ops, avg_power))
+        results.append((name, wall_s, e_j, avg_power))
 
     use_ec = any(f"{p[1]}_energy_j" in ts for p in phases)
     print(f"  Energy source: {'hardware energy counter' if use_ec else 'power sampling + integration'}")
