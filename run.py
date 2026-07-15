@@ -322,6 +322,13 @@ def run_pytorch_mode():
     pf = prefill_graph.get_stage_stats("prefill")
     print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
 
+    # Warmup：cuDNN autotuning + CUDA kernel 缓存预热，不出现在测量窗口内
+    if HARDWARE_PROFILING and profiler.available:
+        with torch.no_grad():
+            _ = model(prompt_ids)
+        import time; time.sleep(0.5)
+        torch.cuda.synchronize()
+
     # Step 1b: Prefill 能耗测量（干净的 forward，无编译开销）
     write_timestamp("prefill_start", ts_path)
     write_energy("prefill_start", ts_path)
