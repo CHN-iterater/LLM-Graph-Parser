@@ -317,6 +317,9 @@ def run_pytorch_mode():
 
     # Warmup：运行 2 秒 forward 让 GPU 升温至满负荷稳态
     if HARDWARE_PROFILING and profiler.available:
+        print(f"  [cooling] 60s before warmup...", end=" ", flush=True)
+        time.sleep(60)
+        print(f"done")
         print(f"  [warmup] running 2s forward passes...", end=" ", flush=True)
         t0 = time.time()
         with torch.no_grad():
