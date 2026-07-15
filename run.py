@@ -325,9 +325,9 @@ def run_pytorch_mode():
 
     # Warmup：100 次 forward，让 GPU 升温至满负荷稳态
     if HARDWARE_PROFILING and profiler.available:
-        print(f"  [warmup] 100 forward passes to reach steady state...")
+        print(f"  [warmup] 300 forward passes to reach steady state...")
         with torch.no_grad():
-            for _ in range(100):
+            for _ in range(300):
                 _ = model(prompt_ids)
         torch.cuda.synchronize()
         print(f"  [warmup] done, starting measurement")
@@ -346,18 +346,19 @@ def run_pytorch_mode():
     write_energy("prefill_end", ts_path)
     write_timestamp("prefill_end", ts_path)
 
-    # Step 2: Decode — 单 token 前向能耗测量
+    # Step 2: Decode — 单 token 前向能耗测量（多次 forward 取平均）
     decode_token = prompt_ids[:, -1:]
     decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
     write_timestamp("decode_start", ts_path)
     write_energy("decode_start", ts_path)
     if HARDWARE_PROFILING and profiler.available:
-        with torch.no_grad():
-            _ = model(decode_token)
-        torch.cuda.synchronize()
+        _ = profiler.time_forward(model, decode_token, label="decode", num_runs=PROFILING_RUNS)
+        total_dc_gpu_us = profiler._decode_total_us * PROFILING_RUNS
+        with open(ts_path, "a") as tf:
+            tf.write(f"decode_gpu_us {int(total_dc_gpu_us)}\n")
     write_energy("decode_end", ts_path)
     write_timestamp("decode_end", ts_path)
-    print(f"  [Phase 2/3] Decode (1 token forward)")
+    print(f"  [Phase 2/3] Decode ({PROFILING_RUNS} token forwards)")
 
     # ONNX 导出
     decode_graph = parse_model(model, decode_token, model_name=model_label, onnx_path="")
