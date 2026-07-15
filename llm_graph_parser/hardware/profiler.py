@@ -47,9 +47,8 @@ class HardwareProfiler:
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         with torch.no_grad():
-            base_len = input_ids.shape[1]
             for i in range(num_runs):
-                pad = torch.zeros(1, i, dtype=torch.long, device=input_ids.device)
+                pad = torch.zeros(1, i % 4, dtype=torch.long, device=input_ids.device)
                 x = torch.cat([input_ids, pad], dim=1)
                 _ = model(x)
         end.record()
