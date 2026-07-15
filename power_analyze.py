@@ -143,7 +143,7 @@ def main():
     # ---- 阶段积分：直接用 E_total - P_baseline × wall，不依赖 GPU 比例 ----
     phases = [
         ("Prefill", "prefill_start", "prefill_end"),
-        ("Decode", "gen_start", "gen_end"),
+        ("Decode", "decode_start", "decode_end"),
     ]
     results = []
     for name, s, e in phases:
@@ -162,11 +162,6 @@ def main():
             e_j = e_j_total / runs
 
         avg_power = e_j / (wall_s / runs if wall_s > 0 else 1)
-
-        if name == "Decode":
-            e_j /= gen_len
-            wall_s /= gen_len
-
         results.append((name, wall_s, e_j, avg_power))
 
     use_ec = "idle_cuda_end_energy_j" in ts
@@ -195,8 +190,7 @@ def main():
     print(f"  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
     print(f"  {'-' * 50}")
     for name, d, e, w in results:
-        label = f"{name} (per token)" if (name == "Decode" and gen_len > 1) else name
-        print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
+        print(f"  {name:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
     # CUDA overhead 信息展示
     if idle_before > 0 and idle_cuda > 0:
         print(f"\n  [功耗分解]")
