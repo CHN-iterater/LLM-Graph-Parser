@@ -139,16 +139,16 @@ def main():
         energy_tag_s = f"{s}_energy_j"
         energy_tag_e = f"{e}_energy_j"
         if energy_tag_s in ts and energy_tag_e in ts:
-            e_j_all = ts[energy_tag_e] - ts[energy_tag_s]
-            e_j = (e_j_all - avg_baseline * wall_s) / runs
+            e_j_dynamic = ts[energy_tag_e] - ts[energy_tag_s]
+            e_j_dynamic -= avg_baseline * wall_s
         else:
-            e_j, _ = integrate(times, inference_w, ts[s], ts[e])
-            e_j /= runs
+            e_j_dynamic, _ = integrate(times, inference_w, ts[s], ts[e])
 
-        # — 对齐口径 —
-        avg_power = (e_j_dynamic / runs) / (wall_s if wall_s > 0 else 1)
+        avg_power = e_j_dynamic / wall_s if wall_s > 0 else 0
+        e_j = e_j_dynamic / runs
+
         if name == "Decode":
-            e_j_ops /= gen_len
+            e_j /= gen_len
             wall_s /= gen_len
 
         results.append((name, wall_s, e_j_ops, avg_power))
