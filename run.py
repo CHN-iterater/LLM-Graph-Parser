@@ -315,14 +315,6 @@ def run_pytorch_mode():
     print(f"  Prompt: \"{prompt}\"")
     print(f"  tokens: {seq_len}")
 
-    # Step 1a: ONNX 导出（含第一次编译开销，放在测量前）
-    prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
-    prefill_graph.prompt_text = prompt
-    prefill_graph.prompt_tokens = seq_len
-    prefill_graph.tag_unassigned_as("prefill")
-    pf = prefill_graph.get_stage_stats("prefill")
-    print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
-
     # Warmup：运行 2 秒 forward 让 GPU 升温至满负荷稳态
     if HARDWARE_PROFILING and profiler.available:
         print(f"  [warmup] running 2s forward passes...", end=" ", flush=True)
@@ -352,11 +344,6 @@ def run_pytorch_mode():
     decode_token = prompt_ids[:, -1:]
     decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
     if HARDWARE_PROFILING and profiler.available:
-        # ONNX 导出后模型可能被移回 CPU，确保其在 GPU 上
-        if next(model.parameters()).device.type != "cuda":
-            model = model.to(device)
-            print("  [model] moved back to GPU")
-
         print(f"  [warmup decode] running 2s forward passes...", end=" ", flush=True)
         t0 = time.time()
         with torch.no_grad():
@@ -377,12 +364,19 @@ def run_pytorch_mode():
     print(f"  [Phase 2/3] Decode ({PROFILING_RUNS} token forwards)")
 
     # ONNX 导出
+    prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
+    prefill_graph.prompt_text = prompt
+    prefill_graph.prompt_tokens = seq_len
+    prefill_graph.tag_unassigned_as("prefill")
+    pf = prefill_graph.get_stage_stats("prefill")
+    print(f"    prefill ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
+
     decode_graph = parse_model(model, decode_token, model_name=model_label, onnx_path="")
     decode_graph.prompt_tokens = 1
     decode_graph.tag_unassigned_as("decode")
     dc = decode_graph.get_stage_stats("decode")
     dc_flops_per = dc["total_flops"]
-    print(f"    per-step: ops={dc['num_ops']}, FLOPs={dc_flops_per/1e6:.2f}M, AI={dc['arith_intensity']:.2f}")
+    print(f"    decode per-step: ops={dc['num_ops']}, FLOPs={dc_flops_per/1e6:.2f}M, AI={dc['arith_intensity']:.2f}")
     write_timestamp("decode_end", ts_path)
 
     # Step 3: Generation
