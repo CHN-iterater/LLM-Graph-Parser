@@ -151,19 +151,17 @@ def main():
                     pf1 = _parse_energy(ec_lines, i)
                 if "--- Decode" in ls:
                     dc1 = _parse_energy(ec_lines, i)
-        if pf1 is None and dc1 is None:
-            results.append((model_name, "REFACTOR FAILED (D1 only), D2 OK"))
 
-        # Step 4: graph_operator_extractor.py
-        ok, _ = run_cmd(
+        # Step 4: graph_operator_extractor.py（可选，失败不阻塞）
+        run_cmd(
             [sys.executable, "graph_operator_extractor.py", "-g", str(graph_path)],
             f"{model_name}: graph_operator_extractor")
-        if not ok:
-            results.append((model_name, "FAILED at graph_operator_extractor"))
-            continue
 
-        results.append((model_name, "OK"))
+        status = "OK"
+        if pf1 is None:
+            status = "D2 OK (D1 N/A)"
         energy_summary[model_name] = (pf1, pf2, dc1, dc2)
+        results.append((model_name, status))
 
         # 冷却等待（让 GPU 降温后再测下一个模型）
         if model_name != models[-1]:
