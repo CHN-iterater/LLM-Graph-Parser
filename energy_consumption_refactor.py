@@ -13,56 +13,60 @@ from pathlib import Path
 
 
 def load_operator_energy(csv_path):
-    """single_operator_summary.csv → (db, aux_energy)
-
-    aux_energy_fb = 无 OP_MAP 映射的辅助算子的 fallback 系数。
-    CSV 有两种格式：
-      - 旧版：energy_j 是多次 profiling 的总能量，直接使用
-      - 新版（200ms 窗口）：有 net_power_w，归一化到单次迭代
-    """
+    """single_operator_summary.csv → (db, aux_energy)"""
     db = {}
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
-        has_net = "net_energy_j" in reader.fieldnames
+        has_input_dims = "input_N" in reader.fieldnames
         for row in reader:
             name = row["operator"].strip()
-            try:
-                m, n, k = row.get("M", ""), row.get("N", ""), row.get("K", "")
-                flops = 2 * int(m) * int(n) * int(k) if m and n and k else 0
-            except ValueError:
-                flops = 0
-            time_ms = float(row["time_per_iter_ms"])
-
-            if has_net:
-                net_power = float(row["net_power_w"])
-                energy = net_power * time_ms / 1000
-            else:
-                energy = float(row["energy_j"])
-
             cat = row.get("category", "").strip()
-            # 计算 benchmark 该算子的访存量（字节），用于 memory 缩放
-            if cat == "compute_intensive" and not (m and n and k):
-                try:
-                    bs = int(row.get("batch_size", 0) or 0)
-                    sl = int(row.get("seq_len", 0) or 0)
-                    nh = int(row.get("num_heads", 0) or 0)
-                    hd = int(row.get("head_dim", 0) or 0)
-                    mem = 4 * bs * sl * nh * hd * 2 if (bs and sl and nh and hd) else 0
-                except ValueError:
-                    mem = 0
-            elif m and n:
-                im, inn = int(m), int(n)
-                if cat == "compute_intensive" and k:
-                    ik = int(k)
-                    mem = (im * ik + ik * inn + im * inn) * 2  # A+B+C, FP16
+
+            if has_input_dims:
+                # 新版 CSV：有 input_N/M/K 列，net_energy_j 是多次迭代总和
+                iN = int(row.get("input_N", 0) or 0)
+                iM = int(row.get("input_M", 0) or 0)
+                iK = int(row.get("input_K", 0) or 0)
+                oN = int(row.get("output_N", 0) or 0)
+                oM = int(row.get("output_M", 0) or 0)
+                oK = int(row.get("output_K", 0) or 0)
+                iter_count = int(row.get("iter_count", 1) or 1)
+                flops = 2 * iM * iN * iK if iK > 0 else 0
+                energy = float(row["net_energy_j"]) / iter_count  # J/iter
+                time_ms = float(row["time_per_iter_ms"])
+
+                # 计算访存量
+                if iK > 0 and cat == "compute_intensive":
+                    mem = (iM * iK + iK * iN + iM * iN) * 2
+                elif iM > 0 and iN > 0:
+                    mem = 4 * iM * iN  # FP16 read + write
                 else:
-                    mem = 4 * im * inn  # read + write, FP16
+                    mem = 0
             else:
-                mem = 0
+                # 旧版 CSV
+                try:
+                    m, n, k = row.get("M", ""), row.get("N", ""), row.get("K", "")
+                    flops = 2 * int(m) * int(n) * int(k) if m and n and k else 0
+                except ValueError:
+                    flops = 0
+                time_ms = float(row["time_per_iter_ms"])
+                if "net_energy_j" in row:
+                    energy = float(row["net_power_w"]) * time_ms / 1000
+                else:
+                    energy = float(row["energy_j"])
+                im = int(row.get("M", 0) or 0)
+                inn = int(row.get("N", 0) or 0)
+                ik = int(row.get("K", 0) or 0)
+                if cat == "compute_intensive" and ik > 0 and im > 0 and inn > 0:
+                    mem = (im * ik + ik * inn + im * inn) * 2
+                elif im > 0 and inn > 0:
+                    mem = 4 * im * inn
+                else:
+                    mem = 0
 
             db[name] = {
                 "energy_j": energy,
-                "power_w": float(row["power_mean_w"]),
+                "power_w": float(row.get("power_mean_w", 0) or 0),
                 "time_ms": time_ms,
                 "flops": flops,
                 "mem_bytes": mem,
