@@ -45,14 +45,17 @@ class HardwareProfiler:
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
+        import os
+        os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
         start.record()
         with torch.no_grad():
             for i in range(num_runs):
-                pad = torch.zeros(1, i % 4, dtype=torch.long, device=input_ids.device)
+                pad = torch.zeros(1, i % 3, dtype=torch.long, device=input_ids.device)
                 x = torch.cat([input_ids, pad], dim=1)
                 _ = model(x)
         end.record()
         torch.cuda.synchronize()
+        os.environ.pop("PYTORCH_NO_CUDA_MEMORY_CACHING", None)
 
         self._memory_peak = torch.cuda.max_memory_allocated(self._device)
         us = start.elapsed_time(end) * 1000 // num_runs
