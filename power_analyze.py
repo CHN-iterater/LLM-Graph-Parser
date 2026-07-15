@@ -100,10 +100,6 @@ def main():
         a_s = ts["idle_after_end"] - ts["idle_after_start"]
         idle_after = ae / max(a_s, 0.1)
 
-    # 基线 = idle_before（GPU 物理空闲），sync 间隙 GPU 回到此功率
-    avg_baseline = idle_before
-
-    gpu_tag_map = {"Prefill": "prefill_gpu_us", "Decode": "decode_gpu_us"}
     phases = [("Prefill", "prefill_start", "prefill_end"), ("Decode", "gen_start", "gen_end")]
     results = []
     for name, s, e in phases:
@@ -112,23 +108,24 @@ def main():
 
         wall_s = ts[e] - ts[s]
 
+        # 基线 = 阶段起止时刻 GPU 0 瞬时功率的均值
+        def _p(t_sec):
+            if len(times) == 0:
+                return 0.0
+            idx = np.argmin(np.abs(times - t_sec))
+            return float(powers[idx, 0])
+        P_bl = (_p(ts[s]) + _p(ts[e])) / 2.0
+
         energy_tag_s = f"{s}_energy_j"
         energy_tag_e = f"{e}_energy_j"
         if energy_tag_s in ts and energy_tag_e in ts:
             e_j_all = ts[energy_tag_e] - ts[energy_tag_s]
-            e_j_dynamic = e_j_all - avg_baseline * wall_s
+            e_j_dynamic = e_j_all - P_bl * wall_s
         else:
-            e_j_dynamic, _ = integrate(times, powers[:, 0], ts[s], ts[e])
-
-        e_j_op = e_j_dynamic
-        gpu_tag = gpu_tag_map[name]
-        if gpu_tag in ts:
-            gpu_s = ts[gpu_tag] / 1e6
-            ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
-            e_j_op = e_j_dynamic * ratio
+            e_j_dynamic, _ = integrate(times, powers[:, 0] - P_bl, ts[s], ts[e])
 
         avg_power = e_j_dynamic / wall_s if wall_s > 0 else 0
-        e_j = e_j_op / runs
+        e_j = e_j_dynamic / runs
 
         if name == "Decode":
             e_j /= gen_len
@@ -161,10 +158,8 @@ def main():
         label = f"{name} (per token)" if (name == "Decode" and gen_len > 1) else name
         print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
 
-    if avg_baseline > 0:
-        print(f"\n  [基线] baseline = {avg_baseline:.1f}W (idle_before)")
-    if idle_before > 0 or idle_after > 0:
-        print(f"  idle_before={idle_before:.1f}W  idle_after={idle_after:.1f}W")
+    if idle_before > 0:
+        print(f"\n  [参考] idle_before={idle_before:.1f}W  idle_after={idle_after:.1f}W")
 
     if len(results) >= 2:
         td = sum(r[1] for r in results)
