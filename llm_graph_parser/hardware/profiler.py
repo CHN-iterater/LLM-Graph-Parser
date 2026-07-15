@@ -49,6 +49,7 @@ class HardwareProfiler:
         with torch.no_grad():
             for _ in range(num_runs):
                 _ = model(input_ids)
+                torch.cuda.synchronize()
         end.record()
         torch.cuda.synchronize()
 
