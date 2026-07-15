@@ -45,17 +45,13 @@ class HardwareProfiler:
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
-        import os
-        os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
         start.record()
         with torch.no_grad():
-            for i in range(num_runs):
-                pad = torch.zeros(1, i % 3, dtype=torch.long, device=input_ids.device)
-                x = torch.cat([input_ids, pad], dim=1)
-                _ = model(x)
+            for _ in range(num_runs):
+                _ = model(input_ids)
+                torch.cuda.synchronize()
         end.record()
         torch.cuda.synchronize()
-        os.environ.pop("PYTORCH_NO_CUDA_MEMORY_CACHING", None)
 
         self._memory_peak = torch.cuda.max_memory_allocated(self._device)
         us = start.elapsed_time(end) * 1000 // num_runs
@@ -69,13 +65,9 @@ class HardwareProfiler:
     def time_generate(self, model, input_ids, max_new_tokens=20,
                       num_runs: int = 1,
                       **gen_kwargs) -> tuple[int, float]:
-        """Run generate (num_runs times), return (tokens, avg time us)."""
         if not self._available:
             return 0, 0.0
         import torch
-
-        torch.cuda.reset_peak_memory_stats(self._device)
-        self._memory_start = torch.cuda.memory_allocated(self._device)
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
@@ -87,7 +79,6 @@ class HardwareProfiler:
         end.record()
         torch.cuda.synchronize()
 
-        self._memory_peak = torch.cuda.max_memory_allocated(self._device)
         us = start.elapsed_time(end) * 1000 // num_runs
         self._decode_total_us = us
         return out.shape[1] - input_ids.shape[1], us
@@ -97,7 +88,6 @@ class HardwareProfiler:
     # ------------------------------------------------------------------
 
     def attach_to_graph(self, graph) -> None:
-        """Store measured latency into ``hardware_metrics``."""
         if not self._available or not graph:
             return
         total_f = sum(n.flops for n in graph.nodes) or 1
@@ -109,31 +99,21 @@ class HardwareProfiler:
                 "gpu_memory_peak_mb": round(mem, 2),
             })
 
-    # ------------------------------------------------------------------
-    # Report
-    # ------------------------------------------------------------------
-
     def report_text(self, gen_len: int = 0, total_flops: float = 0,
                     total_bytes: float = 0) -> str:
-        """Format report with measured latency, bandwidth, throughput."""
         if not self._available:
             return "  GPU profiling: not available (no CUDA device detected)"
         import torch
-
         pf = self._prefill_total_us / 1000
         dc = self._decode_total_us / 1000
         total = pf + dc
         mem = max(self._memory_peak - self._memory_start, 0) / 1e6
-
         lines = [
-            "=" * 60,
-            "  Hardware Profiling",
-            "=" * 60,
+            "=" * 60, "  Hardware Profiling", "=" * 60,
             f"  Device: {torch.cuda.get_device_name(0)}",
             f"  Memory peak: {mem:.0f} MB",
             "",
-            f"  {'Phase':20s} {'Time (ms)':>12s}",
-            "-" * 34,
+            f"  {'Phase':20s} {'Time (ms)':>12s}", "-" * 34,
         ]
         if pf > 0:
             lines.append(f"{'Prefill':20s} {pf:>12.2f}")
