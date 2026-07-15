@@ -285,7 +285,7 @@ def run_pytorch_mode():
             print("  [hardware] 设置 HARDWARE_PROFILING=True 启用延迟测量")
 
     # 稳态空闲功率：等待模型加载瞬态消退后快速测量
-    import time; time.sleep(5)
+    import time; time.sleep(30)
     write_timestamp("idle_cuda_start", ts_path)
     write_energy("idle_cuda_start", ts_path)
     time.sleep(2)
