@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
 
 from llm_graph_parser import parse_model, parse_onnx
 from llm_graph_parser.hardware import HardwareProfiler
@@ -322,14 +323,16 @@ def run_pytorch_mode():
     pf = prefill_graph.get_stage_stats("prefill")
     print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
 
-    # Warmup：cuDNN autotuning + CUDA kernel 缓存预热，不出现在测量窗口内
+    # Warmup：100 次 forward，让 GPU 升温至满负荷稳态
     if HARDWARE_PROFILING and profiler.available:
+        print(f"  [warmup] 100 forward passes to reach steady state...")
         with torch.no_grad():
-            _ = model(prompt_ids)
-        import time; time.sleep(0.5)
+            for _ in range(100):
+                _ = model(prompt_ids)
         torch.cuda.synchronize()
+        print(f"  [warmup] done, starting measurement")
 
-    # Step 1b: Prefill 能耗测量（干净的 forward，无编译开销）
+    # Step 1b: Prefill 能耗测量（稳态下的 forward）
     write_timestamp("prefill_start", ts_path)
     write_energy("prefill_start", ts_path)
     print(f"  [Phase 1/3] Prefill (profiling, {PROFILING_RUNS} runs)")
