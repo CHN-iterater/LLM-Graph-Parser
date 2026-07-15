@@ -124,8 +124,17 @@ def main():
         else:
             e_j_dynamic, _ = integrate(times, powers[:, 0] - P_bl, ts[s], ts[e])
 
+        # GPU_busy 比例压缩 → 排除框架开销
+        gpu_us_tag = {"Prefill": "prefill_gpu_us", "Decode": "decode_gpu_us"}[name]
+        if gpu_us_tag in ts:
+            gpu_s = ts[gpu_us_tag] / 1e6
+            ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
+        else:
+            ratio = 1.0
+        e_j_op = e_j_dynamic * ratio
+
         avg_power = e_j_dynamic / wall_s if wall_s > 0 else 0
-        e_j = e_j_dynamic / runs
+        e_j = e_j_op / runs
 
         if name == "Decode":
             e_j /= gen_len
