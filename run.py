@@ -268,6 +268,11 @@ def run_pytorch_mode():
     model.eval()
     print(f"  参数总量: {sum(p.numel() for p in model.parameters()):,}")
 
+    # 关闭 KV cache，保证每次 forward 都是完整前向（与方向 1 对齐）
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+        print("  [config] use_cache=False")
+
     # ---- 硬件 profiling 初始化 ----
     profiler = HardwareProfiler()
     device = torch.device("cuda" if (HARDWARE_PROFILING and torch.cuda.is_available()) else "cpu")
