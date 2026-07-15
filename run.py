@@ -346,10 +346,20 @@ def run_pytorch_mode():
     write_energy("prefill_end", ts_path)
     write_timestamp("prefill_end", ts_path)
 
-    # Step 2: Decode
-    write_timestamp("decode_start", ts_path)
-    print(f"  [Phase 2/3] Decode (1 token)")
+    # Step 2: Decode — 单 token 前向能耗测量
     decode_token = prompt_ids[:, -1:]
+    decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
+    write_timestamp("decode_start", ts_path)
+    write_energy("decode_start", ts_path)
+    if HARDWARE_PROFILING and profiler.available:
+        with torch.no_grad():
+            _ = model(decode_token)
+        torch.cuda.synchronize()
+    write_energy("decode_end", ts_path)
+    write_timestamp("decode_end", ts_path)
+    print(f"  [Phase 2/3] Decode (1 token forward)")
+
+    # ONNX 导出
     decode_graph = parse_model(model, decode_token, model_name=model_label, onnx_path="")
     decode_graph.prompt_tokens = 1
     decode_graph.tag_unassigned_as("decode")

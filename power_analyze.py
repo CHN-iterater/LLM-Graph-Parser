@@ -59,6 +59,7 @@ def load_timestamps(path):
                 if line.startswith(tag):
                     ts[tag] = int(line.strip().split()[1])
             for tag in ("start_energy_j", "prefill_start_energy_j", "prefill_end_energy_j",
+                        "decode_start_energy_j", "decode_end_energy_j",
                         "gen_start_energy_j", "gen_end_energy_j",
                         "idle_before_start_energy_j", "idle_before_end_energy_j",
                         "idle_after_start_energy_j", "idle_after_end_energy_j",
@@ -100,7 +101,7 @@ def main():
         a_s = ts["idle_after_end"] - ts["idle_after_start"]
         idle_after = ae / max(a_s, 0.1)
 
-    phases = [("Prefill", "prefill_start", "prefill_end"), ("Decode", "gen_start", "gen_end")]
+    phases = [("Prefill", "prefill_start", "prefill_end"), ("Decode", "decode_start", "decode_end")]
     results = []
     for name, s, e in phases:
         if s not in ts or e not in ts:
@@ -137,8 +138,7 @@ def main():
         e_j = e_j_op / runs
 
         if name == "Decode":
-            e_j /= gen_len
-            wall_s /= gen_len
+            pass  # 单 token 前向，不除以 gen_len
 
         results.append((name, wall_s, e_j, avg_power))
 
@@ -171,7 +171,7 @@ def main():
     print(f"  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
     print(f"  {'-' * 50}")
     for name, d, e, w in results:
-        label = f"{name} (per token)" if (name == "Decode" and gen_len > 1) else name
+        label = name
         print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
 
     if idle_before > 0:
