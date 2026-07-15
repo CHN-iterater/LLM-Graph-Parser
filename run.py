@@ -352,11 +352,14 @@ def run_pytorch_mode():
     decode_token = prompt_ids[:, -1:]
     decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
     if HARDWARE_PROFILING and profiler.available:
+        print(f"  [warmup decode] running 2s forward passes...", end=" ", flush=True)
+        t0 = time.time()
         with torch.no_grad():
-            for _ in range(30):
+            while (time.time() - t0) < 2.0:
                 _ = model(decode_token)
-        torch.cuda.synchronize()
-        time.sleep(0.5)
+                torch.cuda.synchronize()
+        time.sleep(1.0)
+        print(f"done, starting measurement")
     write_timestamp("decode_start", ts_path)
     write_energy("decode_start", ts_path)
     if HARDWARE_PROFILING and profiler.available:
