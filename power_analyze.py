@@ -12,18 +12,16 @@ DEFAULT_RUNS = 20  # 默认 profiling 重复次数（对应 run.py 中的 PROFIL
 
 def parse_ts_value(line):
     raw = line.strip()
-    parts = raw.split(None, 1)  # 最多拆成 2 段
+    parts = raw.split(None, 1)
     if len(parts) == 2:
         a, b = parts
-        # 判断哪一段像是时间戳 (HH:MM:SS.mmm → 第 2、5 字符是 ':')
         if len(a) >= 8 and a[2] == ":" and a[5] == ":":
-            ts_str = a  # 新格式: "09:15:23.456 start"
+            ts_str = a
         elif len(b) >= 8 and b[2] == ":" and b[5] == ":":
-            ts_str = b  # 旧格式: "start:09:15:23.456"
+            ts_str = b
         else:
             ts_str = a
     else:
-        # 无空格 → 旧格式 "start:09:15:23.456"
         _, ts_str = raw.split(":", 1)
     h, m = int(ts_str[0:2]), int(ts_str[3:5])
     s, ms = ts_str[6:8], ts_str[9:12]
@@ -50,7 +48,6 @@ def load_timestamps(path):
     ts = {}
     with open(path) as f:
         for line in f:
-            # 普通时间戳（格式: "HH:MM:SS.mmm tag"，用空格前缀防子串误匹配）
             for tag in ("prefill_start", "prefill_end", "decode_start", "decode_end",
                         "gen_start", "gen_end", "end",
                         "idle_before_start", "idle_before_end",
@@ -58,11 +55,9 @@ def load_timestamps(path):
                         "idle_cuda_start", "idle_cuda_end"):
                 if f" {tag}" in line or line.startswith(tag + ":"):
                     ts[tag] = parse_ts_value(line)
-            # GPU 执行时间（μs），格式: "prefill_gpu_us 12345"
             for tag in ("prefill_gpu_us", "decode_gpu_us"):
                 if line.startswith(tag):
                     ts[tag] = int(line.strip().split()[1])
-            # 硬件累计能量（J），格式: "prefill_start_energy_j 1234.56"
             for tag in ("start_energy_j", "prefill_start_energy_j", "prefill_end_energy_j",
                         "gen_start_energy_j", "gen_end_energy_j",
                         "idle_before_start_energy_j", "idle_before_end_energy_j",
@@ -74,7 +69,6 @@ def load_timestamps(path):
 
 
 def integrate(times, power_1d, t_start, t_end):
-    """对一维功率序列在 [t_start, t_end] 上积分求能量。"""
     mask = (times >= t_start) & (times <= t_end)
     if not mask.any():
         return 0.0, 0.0
@@ -86,10 +80,8 @@ def main():
     parser = argparse.ArgumentParser(description="GPU 功耗分析")
     parser.add_argument("-t", "--timestamps", default="timestamps.txt")
     parser.add_argument("-p", "--power", default="power.txt")
-    parser.add_argument("-n", "--runs", type=int, default=DEFAULT_RUNS,
-                        help=f"profiling 重复次数，能耗除以该值得到单次结果（默认 {DEFAULT_RUNS}）")
-    parser.add_argument("--gen-len", type=int, default=1,
-                        help="生成 token 数，decode 能耗除以该值得到单 token 结果（默认 1）")
+    parser.add_argument("-n", "--runs", type=int, default=DEFAULT_RUNS)
+    parser.add_argument("--gen-len", type=int, default=1)
     args = parser.parse_args()
 
     times, powers = load_power(args.power)
@@ -98,26 +90,7 @@ def main():
     runs = max(args.runs, 1)
     gen_len = max(args.gen_len, 1)
 
-    # ---- 基准功耗：GPU 0 + CUDA context 稳态空闲功率（模型加载后热瞬态消退后测量）----
-    baseline = np.zeros(len(times))
-    inference_w = powers[:, 0] if powers.ndim > 1 else powers
-    avg_baseline = 0.0
     idle_before = idle_after = 0.0
-
-    if "idle_cuda_end_energy_j" in ts and "idle_cuda_start_energy_j" in ts:
-        cuda_s = ts["idle_cuda_end"] - ts["idle_cuda_start"]
-        cuda_e = ts["idle_cuda_end_energy_j"] - ts["idle_cuda_start_energy_j"]
-        avg_baseline = cuda_e / max(cuda_s, 0.1)
-    elif n_gpu >= 2:
-        b = powers[:, 1:].mean(axis=1)
-        avg_baseline = float(b.mean())
-        inference_w = powers[:, 0] - b
-    elif "idle_before_end_energy_j" in ts:
-        be = ts["idle_before_end_energy_j"] - ts["idle_before_start_energy_j"]
-        bs = ts["idle_before_end"] - ts["idle_before_start"]
-        avg_baseline = be / max(bs, 0.1)
-
-    # 仅展示用
     if "idle_before_end_energy_j" in ts:
         be = ts["idle_before_end_energy_j"] - ts["idle_before_start_energy_j"]
         bs = ts["idle_before_end"] - ts["idle_before_start"]
@@ -127,7 +100,12 @@ def main():
         a_s = ts["idle_after_end"] - ts["idle_after_start"]
         idle_after = ae / max(a_s, 0.1)
 
-    # ---- 阶段积分：硬件计数器 × idle_cuda 基线，无 GPU 比例 ----
+    def _power_at(t_sec):
+        if len(times) == 0:
+            return 0.0
+        idx = np.argmin(np.abs(times - t_sec))
+        return float(powers[idx, 0])
+
     phases = [("Prefill", "prefill_start", "prefill_end"), ("Decode", "gen_start", "gen_end")]
     results = []
     for name, s, e in phases:
@@ -135,14 +113,17 @@ def main():
             continue
 
         wall_s = ts[e] - ts[s]
+        P_start = _power_at(ts[s])
+        P_end = _power_at(ts[e])
+        P_baseline = (P_start + P_end) / 2.0
 
         energy_tag_s = f"{s}_energy_j"
         energy_tag_e = f"{e}_energy_j"
         if energy_tag_s in ts and energy_tag_e in ts:
-            e_j_dynamic = ts[energy_tag_e] - ts[energy_tag_s]
-            e_j_dynamic -= avg_baseline * wall_s
+            e_j_all = ts[energy_tag_e] - ts[energy_tag_s]
+            e_j_dynamic = e_j_all - P_baseline * wall_s
         else:
-            e_j_dynamic, _ = integrate(times, inference_w, ts[s], ts[e])
+            e_j_dynamic, _ = integrate(times, powers[:, 0], ts[s], ts[e])
 
         avg_power = e_j_dynamic / wall_s if wall_s > 0 else 0
         e_j = e_j_dynamic / runs
@@ -160,7 +141,6 @@ def main():
         print(f"[analyze] {args.timestamps}: timestamps not found")
         return
 
-    # Per-GPU average power
     t0 = ts.get("prefill_start")
     t1 = ts.get("prefill_end", ts.get("decode_end"))
     if t0 is not None and t1 is not None:
@@ -171,23 +151,21 @@ def main():
             print(f"  {'-' * 22}")
             for i in range(min(len(avg), 8)):
                 print(f"  {i:>5d}  {avg[i]:>10.2f}")
-        # 基准功耗说明
-    src = " (idle_cuda)" if "idle_cuda_end_energy_j" in ts else " (GPU1~7)" if n_gpu >= 2 else ""
-    print(f"  Baseline: {avg_baseline:.2f}W{src}")
 
-    # Phase summary (per-run)
+    # Phase summary
     print(f"\n  (除以 {runs} 次 profiling runs，以下为单次推理结果)")
     print(f"  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
     print(f"  {'-' * 50}")
     for name, d, e, w in results:
         label = f"{name} (per token)" if (name == "Decode" and gen_len > 1) else name
         print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
-    # 空闲功耗信息展示
-    if idle_before > 0 and idle_after > 0:
-        print(f"\n  [功耗基线]")
-        print(f"  GPU 0 idle before:  {idle_before:.1f}W")
-        print(f"  GPU 0 idle after:   {idle_after:.1f}W")
-        print(f"  used baseline:      {avg_baseline:.1f}W")
+
+    if idle_before > 0 or idle_after > 0:
+        print(f"\n  [基线信息]")
+        if idle_before > 0:
+            print(f"  GPU 0 idle before:  {idle_before:.1f}W")
+        if idle_after > 0:
+            print(f"  GPU 0 idle after:   {idle_after:.1f}W")
 
     if len(results) >= 2:
         td = sum(r[1] for r in results)
