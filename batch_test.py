@@ -138,7 +138,7 @@ def main():
         # Step 3: energy_consumption_refactor.py（捕获输出以解析方向 1 能耗）
         ok, ec_out = run_cmd(
             [sys.executable, "energy_consumption_refactor.py",
-             "-c", str(BASE_DIR / ".." / "single_operator_summary.csv"),
+             "-c", str(BASE_DIR / ".." / "operator_energy_comparison.csv"),
              "-g", str(graph_path),
              "--gen-len", str(args.gen_len)],
             f"{model_name}: energy_consumption_refactor", capture=True)
@@ -151,9 +151,8 @@ def main():
                     pf1 = _parse_energy(ec_lines, i)
                 if "--- Decode" in ls:
                     dc1 = _parse_energy(ec_lines, i)
-        else:
-            results.append((model_name, "FAILED at energy_consumption_refactor"))
-            continue
+        if pf1 is None and dc1 is None:
+            results.append((model_name, "REFACTOR FAILED (D1 only), D2 OK"))
 
         # Step 4: graph_operator_extractor.py
         ok, _ = run_cmd(
