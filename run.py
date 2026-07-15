@@ -377,7 +377,6 @@ def run_pytorch_mode():
     dc = decode_graph.get_stage_stats("decode")
     dc_flops_per = dc["total_flops"]
     print(f"    decode per-step: ops={dc['num_ops']}, FLOPs={dc_flops_per/1e6:.2f}M, AI={dc['arith_intensity']:.2f}")
-    write_timestamp("decode_end", ts_path)
 
     # Step 3: Generation
     if SKIP_GENERATION:
