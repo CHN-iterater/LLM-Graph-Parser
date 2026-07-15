@@ -323,14 +323,15 @@ def run_pytorch_mode():
     pf = prefill_graph.get_stage_stats("prefill")
     print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
 
-    # Warmup：100 次 forward，让 GPU 升温至满负荷稳态
+    # Warmup：运行 2 秒 forward 让 GPU 升温至满负荷稳态
     if HARDWARE_PROFILING and profiler.available:
-        print(f"  [warmup] 300 forward passes to reach steady state...")
+        print(f"  [warmup] running 2s forward passes...", end=" ", flush=True)
+        t0 = time.time()
         with torch.no_grad():
-            for _ in range(300):
+            while (time.time() - t0) < 2.0:
                 _ = model(prompt_ids)
-        torch.cuda.synchronize()
-        print(f"  [warmup] done, starting measurement")
+                torch.cuda.synchronize()
+        print(f"done, starting measurement")
 
     # Step 1b: Prefill 能耗测量（稳态下的 forward）
     write_timestamp("prefill_start", ts_path)
