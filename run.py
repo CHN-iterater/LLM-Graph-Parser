@@ -331,6 +331,7 @@ def run_pytorch_mode():
             while (time.time() - t0) < 2.0:
                 _ = model(prompt_ids)
                 torch.cuda.synchronize()
+        time.sleep(1.0)
         print(f"done, starting measurement")
 
     # Step 1b: Prefill 能耗测量（稳态下的 forward）
