@@ -142,6 +142,13 @@ def main():
 
         results.append((name, wall_s, e_j, avg_power))
 
+        # 调试信息
+        e_total_display = e_j_all if energy_tag_s in ts and energy_tag_e in ts else e_j_dynamic
+        gpu_ms = ts.get({"Prefill":"prefill_gpu_us","Decode":"decode_gpu_us"}[name], 0) / 1000
+        print(f"  [{name}] wall={ts[e]-ts[s]:.4f}s E_total={e_total_display:.4f}J "
+              f"P_bl={P_bl:.1f}W gpu={gpu_ms:.2f}ms ratio={ratio:.3f} "
+              f"E_op={e_j_op:.4f}J per_run={e_j:.6f}J")
+
     use_ec = any(f"{p[1]}_energy_j" in ts for p in phases)
     print(f"  Energy source: {'hardware energy counter' if use_ec else 'power sampling + integration'}")
 
