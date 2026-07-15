@@ -7,7 +7,7 @@ decode 能耗除以 --gen-len 得到单 token 结果。
 import argparse
 import numpy as np
 
-DEFAULT_RUNS = 20  # 默认 profiling 重复次数（对应 run.py 中的 PROFILING_RUNS）
+DEFAULT_RUNS = 20
 
 
 def parse_ts_value(line):
@@ -90,7 +90,7 @@ def main():
     runs = max(args.runs, 1)
     gen_len = max(args.gen_len, 1)
 
-    idle_before = idle_after = idle_cuda = 0.0
+    idle_before = idle_after = 0.0
     if "idle_before_end_energy_j" in ts:
         be = ts["idle_before_end_energy_j"] - ts["idle_before_start_energy_j"]
         bs = ts["idle_before_end"] - ts["idle_before_start"]
@@ -99,15 +99,9 @@ def main():
         ae = ts["idle_after_end_energy_j"] - ts["idle_after_start_energy_j"]
         a_s = ts["idle_after_end"] - ts["idle_after_start"]
         idle_after = ae / max(a_s, 0.1)
-    if "idle_cuda_end_energy_j" in ts:
-        ce = ts["idle_cuda_end_energy_j"] - ts["idle_cuda_start_energy_j"]
-        cs = ts["idle_cuda_end"] - ts["idle_cuda_start"]
-        idle_cuda = ce / max(cs, 0.1)
 
-    # 基线 = (推理前稳态 + 推理后稳态) / 2，覆盖全程温升
-    candidates = [p for p in (idle_cuda, idle_after) if p > 0]
-    avg_baseline = sum(candidates) / len(candidates) if candidates else idle_before
-    src = f" ({[n for n, v in [('idle_cuda',idle_cuda),('idle_after',idle_after)] if v>0]})"
+    # 基线 = idle_before（GPU 物理空闲），sync 间隙 GPU 回到此功率
+    avg_baseline = idle_before
 
     gpu_tag_map = {"Prefill": "prefill_gpu_us", "Decode": "decode_gpu_us"}
     phases = [("Prefill", "prefill_start", "prefill_end"), ("Decode", "gen_start", "gen_end")]
@@ -126,12 +120,12 @@ def main():
         else:
             e_j_dynamic, _ = integrate(times, powers[:, 0], ts[s], ts[e])
 
-        e_j_op = e_j_dynamic  # operator + framework total
-        gpu_us_tag = gpu_tag_map[name]
-        if gpu_us_tag in ts:
-            gpu_s = ts[gpu_us_tag] / 1e6
+        e_j_op = e_j_dynamic
+        gpu_tag = gpu_tag_map[name]
+        if gpu_tag in ts:
+            gpu_s = ts[gpu_tag] / 1e6
             ratio = min(gpu_s / wall_s, 1.0) if wall_s > 0 else 1.0
-            e_j_op = e_j_dynamic * ratio  # operator only
+            e_j_op = e_j_dynamic * ratio
 
         avg_power = e_j_dynamic / wall_s if wall_s > 0 else 0
         e_j = e_j_op / runs
@@ -160,7 +154,6 @@ def main():
             for i in range(min(len(avg), 8)):
                 print(f"  {i:>5d}  {avg[i]:>10.2f}")
 
-    # Phase summary
     print(f"\n  (除以 {runs} 次 profiling runs，以下为单次推理结果)")
     print(f"  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
     print(f"  {'-' * 50}")
@@ -168,14 +161,10 @@ def main():
         label = f"{name} (per token)" if (name == "Decode" and gen_len > 1) else name
         print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
 
-    if idle_cuda > 0 or idle_before > 0 or idle_after > 0:
-        print(f"\n  [基线] avg_baseline = {avg_baseline:.1f}W")
-        if idle_cuda > 0:
-            print(f"    idle_cuda (pre-inference): {idle_cuda:.1f}W")
-        if idle_before > 0:
-            print(f"    idle_before (no CUDA):     {idle_before:.1f}W")
-        if idle_after > 0:
-            print(f"    idle_after (post-inference): {idle_after:.1f}W")
+    if avg_baseline > 0:
+        print(f"\n  [基线] baseline = {avg_baseline:.1f}W (idle_before)")
+    if idle_before > 0 or idle_after > 0:
+        print(f"  idle_before={idle_before:.1f}W  idle_after={idle_after:.1f}W")
 
     if len(results) >= 2:
         td = sum(r[1] for r in results)
