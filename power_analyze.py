@@ -172,7 +172,8 @@ def main():
             for i in range(min(len(avg), 8)):
                 print(f"  {i:>5d}  {avg[i]:>10.2f}")
         # 基准功耗说明
-    print(f"  Baseline: {avg_baseline:.2f}W{baseline_src}")
+    src = " (idle_cuda)" if "idle_cuda_end_energy_j" in ts else " (GPU1~7)" if n_gpu >= 2 else ""
+    print(f"  Baseline: {avg_baseline:.2f}W{src}")
 
     # Phase summary (per-run)
     print(f"\n  (除以 {runs} 次 profiling runs，以下为单次推理结果)")
