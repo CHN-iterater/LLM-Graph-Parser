@@ -21,23 +21,33 @@ def prod(shape):
     return p
 
 
-def extract_mnk(tensors, op_type=""):
-    """从 tensor shape 列表提取 (N, M, K)。
+def extract_mnk_ins(ins, op_type=""):
+    """从输入 tensor 列表提取 (N, M, K)。
 
-    对 GEMM/BMM 用两输入推导 A[M×K] @ B[K×N] → C[M×N]。
-    其余取输出 tensor 的 shape。
+    GEMM/BMM: A[M×K] @ B[K×N] → 返回 (N, M, K) = (B[-1], prod(A[:-1]), A[-1])
+    其余: 取元素数最多的输入 tensor 的 shape（广播等价于最大者）
     """
-    if not tensors:
+    if not ins:
         return 0, 0, 0
-    shapes = [t["shape"] for t in tensors]
+    shapes = [t["shape"] for t in ins]
 
-    is_gemm = op_type in ("GEMM", "LINEAR", "BMM")
-    if is_gemm and len(shapes) >= 2:
+    if op_type in ("GEMM", "LINEAR", "BMM") and len(shapes) >= 2:
         A, B = shapes[0], shapes[1]
         if len(A) >= 2 and len(B) >= 2:
             return B[-1], prod(A[:-1]), A[-1]
 
-    s = shapes[0]
+    # 取 broadcast 后的有效 shape（元素数最多的输入）
+    best = max(shapes, key=prod)
+    if len(best) >= 2:
+        return best[-1], prod(best[:-1]), 0
+    return best[0], 1, 0
+
+
+def extract_mnk_outs(outs):
+    """从输出 tensor 列表提取 (N, M, K)。"""
+    if not outs:
+        return 0, 0, 0
+    s = outs[0]["shape"]
     if not s:
         return 0, 0, 0
     if len(s) >= 2:
@@ -97,8 +107,8 @@ AUXILIARY_OPS = {
 
 def _csv_lookup(t, ins, outs, table):
     """从 CSV 查找匹配的 per-iter 能量（J）。返回 None 表示未命中。"""
-    iN, iM, iK = extract_mnk(ins, t)
-    oN, oM, oK = extract_mnk(outs, t)
+    iN, iM, iK = extract_mnk_ins(ins, t)
+    oN, oM, oK = extract_mnk_outs(outs)
 
     # 用 ONNX op_type 直接查
     key = (t, iN, iM, iK, oN, oM, oK)
@@ -177,8 +187,8 @@ def main():
         for node in nodes:
             t = node["op_type"]
             csv_name = OP_MAP.get(t, t)
-            iN, iM, iK = extract_mnk(node.get("input_tensors", []))
-            oN, oM, oK = extract_mnk(node.get("output_tensors", []))
+            iN, iM, iK = extract_mnk_ins(node.get("input_tensors", []), t)
+            oN, oM, oK = extract_mnk_outs(node.get("output_tensors", []))
             e = estimate(node, table, aux)
             print(f"  {node.get('stage','?'):8s} {t:20s} {csv_name:12s} "
                   f"({iN},{iM},{iK})  ({oN},{oM},{oK})  {e*1000:>8.4f}")
