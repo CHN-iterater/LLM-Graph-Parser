@@ -46,7 +46,7 @@ class HardwareProfiler:
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        with torch.no_grad(), torch.compiler.disable():
+        with torch.no_grad():
             for _ in range(num_runs):
                 _ = model(input_ids)
         end.record()
