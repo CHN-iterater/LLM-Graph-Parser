@@ -30,7 +30,7 @@ ENERGY_COUNTER = True  # 用 nvml 硬件能量计数器替代功率采样积分
 # 通用工具
 # ====================================================================
 def make_output_dir(model_label: str) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     d = f"output/{model_label}_{timestamp}"
     os.makedirs(d, exist_ok=True)
     return d
