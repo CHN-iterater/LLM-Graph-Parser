@@ -353,8 +353,10 @@ def run_pytorch_mode():
     decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
     if HARDWARE_PROFILING and profiler.available:
         with torch.no_grad():
-            _ = model(decode_token)
+            for _ in range(30):
+                _ = model(decode_token)
         torch.cuda.synchronize()
+        time.sleep(0.5)
     write_timestamp("decode_start", ts_path)
     write_energy("decode_start", ts_path)
     if HARDWARE_PROFILING and profiler.available:
