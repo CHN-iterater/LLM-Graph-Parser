@@ -284,6 +284,14 @@ def run_pytorch_mode():
         if not HARDWARE_PROFILING:
             print("  [hardware] 设置 HARDWARE_PROFILING=True 启用延迟测量")
 
+    # 稳态空闲功率：等待模型加载瞬态消退后快速测量
+    import time; time.sleep(5)
+    write_timestamp("idle_cuda_start", ts_path)
+    write_energy("idle_cuda_start", ts_path)
+    time.sleep(2)
+    write_timestamp("idle_cuda_end", ts_path)
+    write_energy("idle_cuda_end", ts_path)
+
     prompt = PROMPT
     inputs = tokenizer(prompt, return_tensors="pt")
     prompt_ids = inputs["input_ids"]
