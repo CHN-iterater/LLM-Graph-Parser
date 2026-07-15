@@ -352,6 +352,11 @@ def run_pytorch_mode():
     decode_token = prompt_ids[:, -1:]
     decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
     if HARDWARE_PROFILING and profiler.available:
+        # ONNX 导出后模型可能被移回 CPU，确保其在 GPU 上
+        if next(model.parameters()).device.type != "cuda":
+            model = model.to(device)
+            print("  [model] moved back to GPU")
+
         print(f"  [warmup decode] running 2s forward passes...", end=" ", flush=True)
         t0 = time.time()
         with torch.no_grad():
