@@ -90,7 +90,7 @@ def main():
     runs = max(args.runs, 1)
     gen_len = max(args.gen_len, 1)
 
-    idle_before = idle_after = 0.0
+    idle_before = idle_after = idle_cuda = 0.0
     if "idle_before_end_energy_j" in ts:
         be = ts["idle_before_end_energy_j"] - ts["idle_before_start_energy_j"]
         bs = ts["idle_before_end"] - ts["idle_before_start"]
@@ -99,12 +99,15 @@ def main():
         ae = ts["idle_after_end_energy_j"] - ts["idle_after_start_energy_j"]
         a_s = ts["idle_after_end"] - ts["idle_after_start"]
         idle_after = ae / max(a_s, 0.1)
+    if "idle_cuda_end_energy_j" in ts:
+        ce = ts["idle_cuda_end_energy_j"] - ts["idle_cuda_start_energy_j"]
+        cs = ts["idle_cuda_end"] - ts["idle_cuda_start"]
+        idle_cuda = ce / max(cs, 0.1)
 
-    def _power_at(t_sec):
-        if len(times) == 0:
-            return 0.0
-        idx = np.argmin(np.abs(times - t_sec))
-        return float(powers[idx, 0])
+    # 基线 = (推理前稳态 + 推理后稳态) / 2，覆盖全程温升
+    candidates = [p for p in (idle_cuda, idle_after) if p > 0]
+    avg_baseline = sum(candidates) / len(candidates) if candidates else idle_before
+    src = f" ({[n for n, v in [('idle_cuda',idle_cuda),('idle_after',idle_after)] if v>0]})"
 
     phases = [("Prefill", "prefill_start", "prefill_end"), ("Decode", "gen_start", "gen_end")]
     results = []
@@ -113,15 +116,12 @@ def main():
             continue
 
         wall_s = ts[e] - ts[s]
-        P_start = _power_at(ts[s])
-        P_end = _power_at(ts[e])
-        P_baseline = (P_start + P_end) / 2.0
 
         energy_tag_s = f"{s}_energy_j"
         energy_tag_e = f"{e}_energy_j"
         if energy_tag_s in ts and energy_tag_e in ts:
             e_j_all = ts[energy_tag_e] - ts[energy_tag_s]
-            e_j_dynamic = e_j_all - P_baseline * wall_s
+            e_j_dynamic = e_j_all - avg_baseline * wall_s
         else:
             e_j_dynamic, _ = integrate(times, powers[:, 0], ts[s], ts[e])
 
@@ -160,12 +160,14 @@ def main():
         label = f"{name} (per token)" if (name == "Decode" and gen_len > 1) else name
         print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
 
-    if idle_before > 0 or idle_after > 0:
-        print(f"\n  [基线信息]")
+    if idle_cuda > 0 or idle_before > 0 or idle_after > 0:
+        print(f"\n  [基线] avg_baseline = {avg_baseline:.1f}W")
+        if idle_cuda > 0:
+            print(f"    idle_cuda (pre-inference): {idle_cuda:.1f}W")
         if idle_before > 0:
-            print(f"  GPU 0 idle before:  {idle_before:.1f}W")
+            print(f"    idle_before (no CUDA):     {idle_before:.1f}W")
         if idle_after > 0:
-            print(f"  GPU 0 idle after:   {idle_after:.1f}W")
+            print(f"    idle_after (post-inference): {idle_after:.1f}W")
 
     if len(results) >= 2:
         td = sum(r[1] for r in results)
