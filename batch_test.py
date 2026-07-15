@@ -96,7 +96,8 @@ def main():
 
         # Step 1: run.py
         run_args = [sys.executable, "run.py", "--model", model_name, "--prompt", args.prompt,
-                     "--max-new-tokens", str(args.max_new_tokens)]
+                     "--max-new-tokens", str(args.max_new_tokens),
+                     "--runs", str(args.runs)]
         if args.no_hardware:
             run_args.append("--no-hardware")
         ok, _ = run_cmd(run_args, f"{model_name}: run.py")
