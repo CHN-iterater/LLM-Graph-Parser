@@ -3,8 +3,8 @@
 支持 Prefill / Decode 分阶段输出。
 
 用法:
-    python energy_consumption_refactor.py -c single_operator_summary.csv \\
-                                         -g LLM_Graph_Parser/output/Qwen3-0.6B_20260710_*/graph.json \\
+    python energy_consumption_refactor.py -c operator_energy_comparison.csv \\
+                                         -g output/Qwen3-0.6B_20260710_*/graph.json \\
                                          -o energy_report.txt --gen-len 20
 """
 import argparse, json, csv
@@ -12,68 +12,58 @@ from collections import defaultdict
 from pathlib import Path
 
 
+def prod(shape):
+    """返回 shape 各维乘积（忽略 -1 表示动态维度）。"""
+    p = 1
+    for d in shape:
+        if d > 0:
+            p *= d
+    return p
+
+
+def extract_mnk(tensors, op_type=""):
+    """从 tensor shape 列表提取 (N, M, K)。
+
+    对 GEMM/BMM 用两输入推导 A[M×K] @ B[K×N] → C[M×N]。
+    其余取输出 tensor 的 shape。
+    """
+    if not tensors:
+        return 0, 0, 0
+    shapes = [t["shape"] for t in tensors]
+
+    is_gemm = op_type in ("GEMM", "LINEAR", "BMM")
+    if is_gemm and len(shapes) >= 2:
+        A, B = shapes[0], shapes[1]
+        if len(A) >= 2 and len(B) >= 2:
+            return B[-1], prod(A[:-1]), A[-1]
+
+    s = shapes[0]
+    if not s:
+        return 0, 0, 0
+    if len(s) >= 2:
+        return s[-1], prod(s[:-1]), 0
+    return s[0], 1, 0
+
+
 def load_operator_energy(csv_path):
-    """single_operator_summary.csv → (db, aux_energy)"""
-    db = {}
+    """operator_energy_comparison.csv → (lookup_table, aux_energy)
+
+    lookup_table: {(op_type, iN, iM, iK, oN, oM, oK): energy_mJ}
+    """
+    table = {}
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
-        has_input_dims = "input_N" in reader.fieldnames
+        col = "csv_operator_summary_repeat5_方式1(mJ)"
         for row in reader:
-            name = row["operator"].strip()
-            cat = row.get("category", "").strip()
+            key = (
+                row["operator"].strip(),
+                int(row["input_N"]), int(row["input_M"]), int(row["input_K"]),
+                int(row["output_N"]), int(row["output_M"]), int(row["output_K"]),
+            )
+            table[key] = float(row[col])  # mJ
 
-            if has_input_dims:
-                # 新版 CSV：有 input_N/M/K 列，net_energy_j 是多次迭代总和
-                iN = int(row.get("input_N", 0) or 0)
-                iM = int(row.get("input_M", 0) or 0)
-                iK = int(row.get("input_K", 0) or 0)
-                oN = int(row.get("output_N", 0) or 0)
-                oM = int(row.get("output_M", 0) or 0)
-                oK = int(row.get("output_K", 0) or 0)
-                iter_count = int(row.get("iter_count", 1) or 1)
-                flops = 2 * iM * iN * iK if iK > 0 else 0
-                energy = float(row["net_energy_j"]) / iter_count  # J/iter
-                time_ms = float(row["time_per_iter_ms"])
-
-                # 计算访存量
-                if iK > 0 and cat == "compute_intensive":
-                    mem = (iM * iK + iK * iN + iM * iN) * 2
-                elif iM > 0 and iN > 0:
-                    mem = 4 * iM * iN  # FP16 read + write
-                else:
-                    mem = 0
-            else:
-                # 旧版 CSV
-                try:
-                    m, n, k = row.get("M", ""), row.get("N", ""), row.get("K", "")
-                    flops = 2 * int(m) * int(n) * int(k) if m and n and k else 0
-                except ValueError:
-                    flops = 0
-                time_ms = float(row["time_per_iter_ms"])
-                if "net_energy_j" in row:
-                    energy = float(row["net_power_w"]) * time_ms / 1000
-                else:
-                    energy = float(row["energy_j"])
-                im = int(row.get("M", 0) or 0)
-                inn = int(row.get("N", 0) or 0)
-                ik = int(row.get("K", 0) or 0)
-                if cat == "compute_intensive" and ik > 0 and im > 0 and inn > 0:
-                    mem = (im * ik + ik * inn + im * inn) * 2
-                elif im > 0 and inn > 0:
-                    mem = 4 * im * inn
-                else:
-                    mem = 0
-
-            db[name] = {
-                "energy_j": energy,
-                "power_w": float(row.get("power_mean_w", 0) or 0),
-                "time_ms": time_ms,
-                "flops": flops,
-                "mem_bytes": mem,
-                "category": cat,
-            }
-    aux_energy = min(e["energy_j"] for e in db.values())
-    return db, aux_energy
+    aux = min(v for v in table.values()) if table else 0.0
+    return table, aux
 
 
 def load_graph(graph_path):
@@ -105,35 +95,53 @@ AUXILIARY_OPS = {
 }
 
 
-def estimate(node, db, aux_energy_fb):
-    t = node.get("op_type", "UNKNOWN")
-    flops = node.get("flops", 0) or 0
-    mem = node.get("memory_bytes", 0) or 0
+def _csv_lookup(t, ins, outs, table):
+    """从 CSV 查找匹配的 per-iter 能量（J）。返回 None 表示未命中。"""
+    iN, iM, iK = extract_mnk(ins, t)
+    oN, oM, oK = extract_mnk(outs, t)
 
-    # 辅助算子：无 OP_MAP 映射的按 memory_bytes 缩放（仅当 mem > 0）
-    if t in AUXILIARY_OPS and not OP_MAP.get(t):
-        if mem > 0:
-            unit_mem = 16384  # 4 × 4096 (FP16 读写各一次，一个 hidden_size 向量)
-            return aux_energy_fb * max(1.0, mem / unit_mem)
-        return aux_energy_fb
+    # 用 ONNX op_type 直接查
+    key = (t, iN, iM, iK, oN, oM, oK)
+    if key in table:
+        return table[key] / 1000
 
+    # 用 OP_MAP 映射名查
     csv_name = OP_MAP.get(t)
-    if csv_name is None or csv_name not in db:
-        return mem / 1e6 * 0.01
+    if csv_name:
+        key = (csv_name, iN, iM, iK, oN, oM, oK)
+        if key in table:
+            return table[key] / 1000
+        key0 = (csv_name, iN, iM, 0, oN, oM, 0)
+        if key0 in table:
+            return table[key0] / 1000
 
-    entry = db[csv_name]
-    ref_f = entry["flops"]
+    # 通配：同名首条
+    for k, v in table.items():
+        if k[0] == (csv_name or t):
+            return v / 1000
+    return None
 
-    # 有 FLOPs → FLOPs 缩放
-    if ref_f > 0 and flops > 0:
-        return entry["energy_j"] * (flops / ref_f)
 
-    # 无 FLOPs → memory_bytes 缩放
-    ref_mem = entry.get("mem_bytes", 0)
-    if ref_mem > 0 and mem > 0:
-        return entry["energy_j"] * (mem / ref_mem)
+def estimate(node, table, aux_fb):
+    t = node.get("op_type", "UNKNOWN")
+    mem = node.get("memory_bytes", 0) or 0
+    ins = node.get("input_tensors", [])
+    outs = node.get("output_tensors", [])
 
-    return entry["energy_j"]
+    # 1) CSV 精确查找优先
+    e = _csv_lookup(t, ins, outs, table)
+    if e is not None:
+        return e
+
+    # 2) 辅助算子按 mem 缩放
+    if t in AUXILIARY_OPS:
+        if mem > 0:
+            unit_mem = 16384
+            return aux_fb * max(1.0, mem / unit_mem)
+        return aux_fb
+
+    # 3) fallback
+    return mem / 1e6 * 0.01
 
 
 def main():
@@ -141,11 +149,11 @@ def main():
     p.add_argument("-c", "--csv", required=True)
     p.add_argument("-g", "--graph", required=True)
     p.add_argument("-o", "--output", default="", help="输出路径（默认与 graph.json 同目录）")
-    p.add_argument("-v", "--verbose", action="store_true", help="打印每个算子的映射与分类详情")
-    p.add_argument("--gen-len", type=int, default=1, help="生成 token 数，decode 能量乘以该值（默认 1）")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--gen-len", type=int, default=1)
     args = p.parse_args()
 
-    db, aux_energy = load_operator_energy(args.csv)
+    table, aux = load_operator_energy(args.csv)
     nodes, summary = load_graph(args.graph)
     graph_dir = Path(args.graph).parent
     output_path = Path(args.output) if args.output else graph_dir / "energy_report.txt"
@@ -153,63 +161,51 @@ def main():
         print(f"[energy] {args.graph}: empty")
         return
 
-    # ---- verbose: 打印 CSV 侧的类别信息 ----
     if args.verbose:
-        print(f"\n[CSV 算子 → 类别]  (aux fallback = {aux_energy:.6f}J)")
-        for name, info in sorted(db.items()):
-            print(f"  {name:20s} → category={info['category']:20s}  E={info['energy_j']:.6f}J  "
-                  f"flops={info['flops']:,}  mem={info['mem_bytes']:,}")
-        print(f"\n[ONNX → CSV 映射表 ({len(OP_MAP)} 条)]")
-        for onnx, csv in sorted(OP_MAP.items()):
-            print(f"  {onnx:20s} → {csv}")
-        print(f"\n[逐算子映射详情]")
-        print(f"  {'stage':8s} {'ONNX op_type':20s} {'→ CSV':20s} {'role':>7} {'flops':>12} {'mem':>10} {'energy(J)':>10}")
-        print(f"  {'-'*8} {'-'*20} {'-'*20} {'-'*7} {'-'*12} {'-'*10} {'-'*10}")
+        print(f"\n[CSV entries]  {len(table)}  (aux_fb = {aux:.4f}mJ)")
+        for op in sorted(set(k[0] for k in table)):
+            print(f"  {op}: {sum(1 for k in table if k[0] == op)} dims")
 
-    # ---- 按 stage 分组 ----
+    # 分组
     pf_nodes = [n for n in nodes if n.get("stage") == "prefill"]
     dc_nodes = [n for n in nodes if n.get("stage") == "decode"]
 
-    # ---- 逐行打印（verbose 模式）----
     if args.verbose:
+        print(f"\n[逐算子映射]")
+        print(f"  {'stage':8s} {'op_type':20s} {'→CSV':12s} {'iN,iM,iK':>14s} {'oN,oM,oK':>14s} {'E(mJ)':>8s}")
+        print(f"  {'-'*8} {'-'*20} {'-'*12} {'-'*14} {'-'*14} {'-'*8}")
         for node in nodes:
             t = node["op_type"]
-            e = estimate(node, db, aux_energy)
-            stage = node.get("stage", "?")
-            role = "aux" if t in AUXILIARY_OPS else "primary"
-            csv_name = OP_MAP.get(t, "<UNMAPPED>")
-            flops = node.get("flops", 0) or 0
-            mem = node.get("memory_bytes", 0) or 0
-            print(f"  {stage:8s} {t:20s} → {csv_name:20s} {role:>7} {flops:>12,} {mem:>10,} {e:>10.6f}")
+            csv_name = OP_MAP.get(t, t)
+            iN, iM, iK = extract_mnk(node.get("input_tensors", []))
+            oN, oM, oK = extract_mnk(node.get("output_tensors", []))
+            e = estimate(node, table, aux)
+            print(f"  {node.get('stage','?'):8s} {t:20s} {csv_name:12s} "
+                  f"({iN},{iM},{iK})  ({oN},{oM},{oK})  {e*1000:>8.4f}")
 
-    # ---- 分阶段计算能耗 ----
-    def stage_report(stage_nodes):
+    # 分阶段计算
+    def stage_report(sn):
         op_energy = defaultdict(float)
         op_count = defaultdict(int)
-        primary_e = 0.0
-        aux_e = 0.0
-        total_e = 0.0
-        total_f = 0
-        for n in stage_nodes:
+        pe = ae = te = 0.0
+        for n in sn:
             t = n["op_type"]
-            e = estimate(n, db, aux_energy)
+            e = estimate(n, table, aux)
             op_energy[t] += e
             op_count[t] += 1
-            total_e += e
-            total_f += n.get("flops", 0) or 0
+            te += e
             if t in AUXILIARY_OPS:
-                aux_e += e
+                ae += e
             else:
-                primary_e += e
-        return op_energy, op_count, total_e, primary_e, aux_e, total_f
+                pe += e
+        return op_energy, op_count, te, pe, ae
 
     stages = []
     for label, sn in [("Prefill", pf_nodes), ("Decode", dc_nodes)]:
         if sn:
-            r = stage_report(sn)
-            stages.append((label, sn, *r))  # 存储单 token 值，不在 stages 中乘以 gen_len
+            stages.append((label, *stage_report(sn)))
 
-    # ---- 组装报告 ----
+    # 输出
     lines = [
         "=" * 70,
         "  Energy Consumption Reconstruction",
@@ -217,106 +213,49 @@ def main():
         f"  Graph:  {args.graph}",
         f"  Nodes:  {len(nodes)}  (prefill: {len(pf_nodes)} + decode: {len(dc_nodes)})",
         f"  Generation length: {args.gen_len} tokens",
-        f"  Auxiliary fallback: {aux_energy:.6f} J/op (benchmark min; mapped ops use their target energy)",
+        f"  CSV entries: {len(table)}, aux_fb = {aux:.4f}mJ",
     ]
 
-    grand_total = 0.0
-    grand_primary = 0.0
-    grand_aux = 0.0
-    grand_flops = 0
-
-    for label, sn, _, _, total, pe, ae, tf in stages:
+    gt = gp = ga = 0.0
+    for label, op_energy, op_count, total, pe, ae in stages:
         mul = args.gen_len if label == "Decode" else 1
-        n_count = len(sn)
-        label_display = f"{label} (per token)" if mul > 1 else label
-        lines += [
-            "",
-            f"  --- {label_display} ---",
-            f"  Nodes: {n_count:>6d}  FLOPs: {tf/1e9:.2f} G",
-            f"  Energy:     {total:.4f} J ({total*1000:.2f} mJ)",
-            f"    ├─ Primary: {pe:.4f} J ({pe/total*100:.1f}%)",
-            f"    └─ Auxiliary: {ae:.4f} J ({ae/total*100:.1f}%)",
-        ]
-        grand_total += total * mul
-        grand_primary += pe * mul
-        grand_aux += ae * mul
-        grand_flops += tf * mul
+        n_count = sum(op_count.values())
+        disp = f"{label} (per token)" if mul > 1 else label
+        lines += ["", f"  --- {disp} ---",
+                  f"  Nodes: {n_count:>6d}",
+                  f"  Energy:  {total:.4f}J ({total*1000:.2f}mJ)",
+                  f"    ├─ Primary: {pe:.4f}J ({pe/total*100:.1f}%)",
+                  f"    └─ Aux: {ae:.4f}J ({ae/total*100:.1f}%)"]
+        gt += total * mul
+        gp += pe * mul
+        ga += ae * mul
 
-    lines += [
-        "",
-        "-" * 70,
-        f"  Aggregated (prefill + decode x{args.gen_len}):",
-        f"  Total energy: {grand_total:.4f} J ({grand_total*1000:.2f} mJ)  "
-        f"FLOPs: {grand_flops/1e9:.2f} G",
-        f"    ├─ Primary: {grand_primary:.4f} J ({grand_primary/grand_total*100:.1f}%)",
-        f"    └─ Auxiliary: {grand_aux:.4f} J ({grand_aux/grand_total*100:.1f}%)",
-    ]
+    lines += ["", "-" * 70,
+              f"  Aggregated (prefill + decode x{args.gen_len}):",
+              f"  Total: {gt:.4f}J ({gt*1000:.2f}mJ)",
+              f"    ├─ Primary: {gp:.4f}J ({gp/gt*100:.1f}%)",
+              f"    └─ Aux: {ga:.4f}J ({ga/gt*100:.1f}%)"]
 
-    # ---- 每个阶段的算符明细 ----
-    for label, sn, op_energy, op_count, total, pe, ae, tf in stages:
-        label_disp = f"{label} (per token)" if (label == "Decode" and args.gen_len > 1) else label
-        lines += [
-            "",
-            f"  {label_disp} operators:",
-            f"  {'Operator':25s} {'Cnt':>5s} {'Energy(J)':>10s} {'%':>6s}",
-            "  " + "-" * 48,
-        ]
+    for label, op_energy, op_count, total, pe, ae in stages:
+        mul = args.gen_len if label == "Decode" else 1
+        disp = f"{label} (per token)" if mul > 1 else label
+        lines += ["", f"  {disp} operators:",
+                  f"  {'Operator':25s} {'Cnt':>5s} {'Energy(mJ)':>12s} {'%':>6s}",
+                  "  " + "-" * 48]
         for op, e in sorted(op_energy.items(), key=lambda x: -x[1]):
             c = op_count[op]
-            lines.append(f"  {op:25s} {c:>5d} {e:>8.6f}  {e/total*100:>5.1f}%")
-        # 小计 primary/auxiliary
+            lines.append(f"  {op:25s} {c:>5d} {e*1000:>10.4f}  {e/total*100:>5.1f}%")
         pe_sub = sum(e for op, e in op_energy.items() if op not in AUXILIARY_OPS)
         ae_sub = sum(e for op, e in op_energy.items() if op in AUXILIARY_OPS)
-        lines.append(f"  {'-'*48}")
-        lines.append(f"  {'Primary subtotal':25s} {'':>5s} {pe_sub:>8.6f}  {pe_sub/total*100:>5.1f}%")
-        lines.append(f"  {'Auxiliary subtotal':25s} {'':>5s} {ae_sub:>8.6f}  {ae_sub/total*100:>5.1f}%")
+        lines += [f"  {'-'*48}",
+                  f"  {'Primary subtotal':25s} {'':>5s} {pe_sub*1000:>10.4f}  {pe_sub/total*100:>5.1f}%",
+                  f"  {'Aux subtotal':25s} {'':>5s} {ae_sub*1000:>10.4f}  {ae_sub/total*100:>5.1f}%"]
 
-    lines.append("")
-    lines.append("  Note: Prefill = 1 forward pass. Decode = 1 token (multiply by gen_len for total).")
-    lines.append("  Primary ops scaled by FLOPs ratio; auxiliary mapped ops use target benchmark energy.")
-
+    lines += ["", "  Note: Per-operator energy looked up from benchmark CSV by exact dimensions."]
     text = "\n".join(lines)
     print(text)
     output_path.write_text(text, encoding="utf-8")
     print(f"  -> saved to {output_path}")
-
-    # ---- Token-level energy report ----
-    decode_data = None
-    for label, sn, op_energy, op_count, total, pe, ae, tf in stages:
-        if label == "Decode":
-            decode_data = (op_energy, op_count, total, ae)
-            break
-
-    if decode_data:
-        op_energy, op_count, total_per, aux_per = decode_data
-        pri_per = total_per - aux_per
-        token_energy_txt = [
-            "=" * 70,
-            "  Token-level Energy Breakdown",
-            "=" * 70,
-            f"  Decode steps: {args.gen_len}",
-            f"  Per-token energy: {total_per:.6f}J",
-            f"  Each step executes the same operator graph ({sum(op_count.values())} nodes):",
-            "",
-        ]
-        for op, e in sorted(op_energy.items(), key=lambda x: -x[1]):
-            c = op_count[op]
-            token_energy_txt.append(f"    {op:25s} x{c:>4d}  {e:>8.6f}J")
-        token_energy_txt.append(f"    {'-'*48}")
-        token_energy_txt.append(f"    {'Total per token':25s}  {total_per:>8.6f}J")
-        token_energy_txt.append(f"    {'Auxiliary':25s}  {aux_per:>8.6f}J")
-        token_energy_txt.append(f"    {'Primary':25s}  {pri_per:>8.6f}J")
-        token_energy_txt.append("")
-        token_energy_txt.append(f"  Per-token energy: {total_per:.6f}J (all {args.gen_len} tokens identical)")
-        token_energy_txt.append(f"  Total decode:     {total_per * args.gen_len:.6f}J")
-        token_energy_txt.append("")
-        token_energy_txt.append("  Note: All decode tokens use the same ONNX graph traced at seq_len=1.")
-        token_energy_txt.append("  The 1st token additionally initializes KV cache from prefill (included in prefill phase).")
-
-        token_text = "\n".join(token_energy_txt)
-        token_path = output_path.with_name(output_path.stem + "_token_energy.txt")
-        token_path.write_text(token_text, encoding="utf-8")
-        print(f"  -> saved to {token_path}")
 
 
 if __name__ == "__main__":
