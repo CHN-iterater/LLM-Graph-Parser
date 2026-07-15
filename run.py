@@ -392,14 +392,6 @@ def run_pytorch_mode():
         print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
         if gen_len == 0:
             print("    (no output - model may need different prompts)")
-        if HARDWARE_PROFILING and profiler.available:
-            try:
-                _ = profiler.time_generate(model, prompt_ids, num_runs=PROFILING_RUNS, **kw)
-            except Exception as pe:
-                print(f"    [profiler] trace failed: {pe}")
-        total_dc_gpu_us = profiler._decode_total_us * PROFILING_RUNS
-        with open(ts_path, "a") as tf:
-            tf.write(f"decode_gpu_us {int(total_dc_gpu_us)}\n")
         write_energy("gen_end", ts_path)
         write_timestamp("gen_end", ts_path)
 
