@@ -342,8 +342,8 @@ def run_pytorch_mode():
 
     # 冷却 10s，让 GPU 温度在 decode 测量前回落到接近 idle
     if HARDWARE_PROFILING and profiler.available:
-        print(f"  [cooling] 20s...", end=" ", flush=True)
-        time.sleep(20)
+        print(f"  [cooling] 60s...", end=" ", flush=True)
+        time.sleep(60)
         torch.cuda.synchronize()
         print(f"done")
 
