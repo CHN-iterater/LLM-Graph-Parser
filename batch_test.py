@@ -71,7 +71,7 @@ def main():
 
     models = args.models or DEFAULT_MODELS
     results = []
-    csv_path = BASE_DIR / ".." / "operator_energy_comparison.csv"
+    csv_path = BASE_DIR / ".." / "single_operator_summary.csv"
 
     if not csv_path.exists():
         print(f"\n  [WARN] {csv_path} not found — energy_consumption_refactor will be skipped")
@@ -117,7 +117,8 @@ def main():
         ok, pa_out = run_cmd(
             [sys.executable, "power_analyze.py",
              "-t", str(timestamps_path),
-             "-n", str(args.runs)],
+             "-n", str(args.runs),
+             "--gen-len", str(args.gen_len)],
             f"{model_name}: power_analyze", capture=True)
         pf2 = dc2 = None
         if ok:
@@ -136,7 +137,7 @@ def main():
         # Step 3: energy_consumption_refactor.py（捕获输出以解析方向 1 能耗）
         ok, ec_out = run_cmd(
             [sys.executable, "energy_consumption_refactor.py",
-             "-c", str(BASE_DIR / ".." / "operator_energy_comparison.csv"),
+             "-c", str(BASE_DIR / ".." / "single_operator_summary.csv"),
              "-g", str(graph_path),
              "--gen-len", str(args.gen_len)],
             f"{model_name}: energy_consumption_refactor", capture=True)
