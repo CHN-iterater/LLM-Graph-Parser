@@ -314,10 +314,18 @@ def run_pytorch_mode():
     print(f"  Prompt: \"{prompt}\"")
     print(f"  tokens: {seq_len}")
 
-    # Step 1: Prefill
+    # Step 1a: ONNX 导出（含第一次编译开销，放在测量前）
+    prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
+    prefill_graph.prompt_text = prompt
+    prefill_graph.prompt_tokens = seq_len
+    prefill_graph.tag_unassigned_as("prefill")
+    pf = prefill_graph.get_stage_stats("prefill")
+    print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
+
+    # Step 1b: Prefill 能耗测量（干净的 forward，无编译开销）
     write_timestamp("prefill_start", ts_path)
     write_energy("prefill_start", ts_path)
-    print(f"  [Phase 1/3] Prefill (profiling)")
+    print(f"  [Phase 1/3] Prefill (profiling, {PROFILING_RUNS} runs)")
     if HARDWARE_PROFILING and profiler.available:
         _ = profiler.time_forward(model, prompt_ids, label="prefill", num_runs=PROFILING_RUNS)
     if HARDWARE_PROFILING and profiler.available:
@@ -327,14 +335,6 @@ def run_pytorch_mode():
             tf.write(f"prefill_gpu_us {int(total_gpu_us)}\n")
     write_energy("prefill_end", ts_path)
     write_timestamp("prefill_end", ts_path)
-
-    # ONNX 导出解析（不在 prefill 窗口内，不影响能耗测量）
-    prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
-    prefill_graph.prompt_text = prompt
-    prefill_graph.prompt_tokens = seq_len
-    prefill_graph.tag_unassigned_as("prefill")
-    pf = prefill_graph.get_stage_stats("prefill")
-    print(f"    ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
 
     # Step 2: Decode
     write_timestamp("decode_start", ts_path)
