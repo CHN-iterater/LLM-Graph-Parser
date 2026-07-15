@@ -284,6 +284,13 @@ def run_pytorch_mode():
         if not HARDWARE_PROFILING:
             print("  [hardware] 设置 HARDWARE_PROFILING=True 启用延迟测量")
 
+    # 在 CUDA context 下测量 GPU 0 空闲功率（含 CUDA overhead）
+    write_timestamp("idle_cuda_start", ts_path)
+    write_energy("idle_cuda_start", ts_path)
+    import time; time.sleep(2)
+    write_timestamp("idle_cuda_end", ts_path)
+    write_energy("idle_cuda_end", ts_path)
+
     prompt = PROMPT
     inputs = tokenizer(prompt, return_tensors="pt")
     prompt_ids = inputs["input_ids"]
