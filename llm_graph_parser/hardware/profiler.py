@@ -45,11 +45,13 @@ class HardwareProfiler:
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
+        vocab_size = model.config.vocab_size
         start.record()
         with torch.no_grad():
-            for _ in range(num_runs):
-                _ = model(input_ids)
-                torch.cuda.synchronize()
+            for i in range(num_runs):
+                x = input_ids.clone()
+                x[0, -1] = (input_ids[0, -1] + i) % vocab_size
+                _ = model(x)
         end.record()
         torch.cuda.synchronize()
 
