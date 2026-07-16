@@ -1,19 +1,18 @@
 """
-能耗重构 — 将单算子能耗数据映射回 graph.json 计算图，估算推理总能耗。
+能耗重构 — 基于 benchmark 拟合公式估算推理总能耗。
 支持 Prefill / Decode 分阶段输出。
 
 用法:
-    python energy_consumption_refactor.py -c operator_energy_comparison.csv \\
-                                         -g output/Qwen3-0.6B_20260710_*/graph.json \\
+    python energy_consumption_refactor.py -g output/Qwen3-0.6B_*/graph.json \\
                                          -o energy_report.txt --gen-len 20
 """
-import argparse, json, csv
+import argparse, json
+import math
 from collections import defaultdict
 from pathlib import Path
 
 
 def prod(shape):
-    """返回 shape 各维乘积（忽略 -1 表示动态维度）。"""
     p = 1
     for d in shape:
         if d > 0:
@@ -22,21 +21,13 @@ def prod(shape):
 
 
 def extract_mnk_ins(ins, op_type=""):
-    """从输入 tensor 列表提取 (N, M, K)。
-
-    GEMM/BMM: A[M×K] @ B[K×N] → 返回 (N, M, K) = (B[-1], prod(A[:-1]), A[-1])
-    其余: 取元素数最多的输入 tensor 的 shape（广播等价于最大者）
-    """
     if not ins:
         return 0, 0, 0
     shapes = [t["shape"] for t in ins]
-
     if op_type in ("GEMM", "LINEAR", "BMM") and len(shapes) >= 2:
         A, B = shapes[0], shapes[1]
         if len(A) >= 2 and len(B) >= 2:
             return B[-1], prod(A[:-1]), A[-1]
-
-    # 取 broadcast 后的有效 shape（元素数最多的输入）
     best = max(shapes, key=prod)
     if len(best) >= 2:
         return best[-1], prod(best[:-1]), 0
@@ -44,7 +35,6 @@ def extract_mnk_ins(ins, op_type=""):
 
 
 def extract_mnk_outs(outs):
-    """从输出 tensor 列表提取 (N, M, K)。"""
     if not outs:
         return 0, 0, 0
     s = outs[0]["shape"]
@@ -55,98 +45,157 @@ def extract_mnk_outs(outs):
     return s[0], 1, 0
 
 
-def load_operator_energy(csv_path):
-    """operator_energy_comparison.csv → (lookup_table, aux_energy)
-
-    lookup_table: {(op_type, iN, iM, iK, oN, oM, oK): energy_mJ}
-    """
-    table = {}
-    with open(csv_path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        col = "csv_operator_summary_repeat5_方式1(mJ)"
-        for row in reader:
-            key = (
-                row["operator"].strip(),
-                int(row["input_N"]), int(row["input_M"]), int(row["input_K"]),
-                int(row["output_N"]), int(row["output_M"]), int(row["output_K"]),
-            )
-            table[key] = float(row[col])  # mJ
-
-    return table
+# -------------------------------------------------------------------
+# 拟合公式：E(N,M,K) = t(N,M,K) × P(N,M,K)
+# -------------------------------------------------------------------
+def _logistic(x, c, d, p1, p2):
+    return c + d / (1 + math.exp(-p1 * x + p2))
 
 
-def load_graph(graph_path):
-    with open(graph_path, encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("nodes", []), data.get("summary", {})
+def _logistic2(n, m, c, d, p1, p2, p3):
+    return _logistic(p1 * math.log2(n) + p2 * math.log2(m), c, d, 1, p3)
 
 
-# ONNX op_type → CSV operator name
-OP_MAP = {
-    "LINEAR": "GEMM", "GEMM": "GEMM", "BMM": "BMM",
-    "ATTENTION": "FlashAttention", "FLASH_ATTENTION": "FlashAttention",
-    "SOFTMAX": "Softmax",
-    "LAYER_NORM": "LayerNorm", "RMS_NORM": "RMSNorm",
-    "GELU": "GELU", "SILU": "SiLU", "RELU": "ReLU", "SIGMOID": "SiLU",
-    "REDUCESUM": "Reduction", "REDUCEMEAN": "Reduction", "MEAN": "Reduction",
-    "KV_CACHE_READ": "KVCacheRead", "KV_CACHE_WRITE": "KVCacheWrite",
-    "CAT": "MemcpyD2D", "SLICE": "MemcpyD2D", "EXPAND": "MemcpyD2D",
-    "ADD": "MemcpyD2D", "MUL": "MemcpyD2D",
+def _linear_t(a, b, *args):
+    return a * prod(args) + b
+
+
+# 算子公式注册表
+# key = (t_func_args, p_func, energy_func)
+#   t_func_args: ("N*M", a, b) 或 ("N*M*K", a, b) 或 ("N,M", aN, bM, cMN, d)
+#   p_func: ("logistic1", c, d, p1, p2) 或 ("logistic2", c, d, p1, p2, p3) 或 ("const", v)
+_FORMULAS = {
+    # ---- 逐元素类（N from output）----
+    "ADD":        ("N*M", 1.91941e-09, 0.0046922,      "logistic1", 56.7262, 410.776, 1.31213, 28.4027),
+    "MUL":        ("N*M", 1.91877e-09, 0.00485007,     "logistic1", 57.7616, 402.096, 1.33557, 28.8748),
+    "NEG":        ("N*M", 1.29882e-09, 0.00485478,     "logistic1", 58.2715, 390.255, 1.23136, 27.3271),
+    "POW":        ("N*M", 1.30003e-09, 0.00557941,     "logistic1", 62.7531, 415.721, 1.29888, 29.0723),
+    "SQRT":       ("N*M", 3.91666e-09, 0.0150007,      "logistic1", 62.309,  430.164, 1.09706, 24.2661),
+    "RECIPROCAL": ("N*M", 3.91462e-09, 0.0157049,      "logistic1", 63.4888, 430.83,  1.18387, 26.1887),
+    "SIGMOID":    ("N*M", 1.37637e-09, 0.00446598,     "logistic1", 63.3293, 544.362, 1.10708, 23.9914),
+    "SiLU":       ("N*M", 1.37637e-09, 0.00446598,     "logistic1", 63.3293, 544.362, 1.10708, 23.9914),  # SiLU≈Sigmoid
+    "RELU":       ("N*M", 1.37637e-09, 0.00446598,     "logistic1", 63.3293, 544.362, 1.10708, 23.9914),  # ReLU≈Sigmoid
+    "GELU":       ("N*M", 1.37637e-09, 0.00446598,     "logistic1", 63.3293, 544.362, 1.10708, 23.9914),  # GELU≈Sigmoid
+    "CAST":       ("N*M", 4.89748e-09, 0.0117041,      "logistic1", 55.116,  364.295, 1.09685, 23.5387),
+    "DIV":        ("N*M", 1.91301e-09, 0.00517741,     "logistic1", 59.6176, 475.238, 1.2691,  27.334),
+    "ISNAN":      ("N*M", 9.57676e-10, 0.00483714,     "logistic1", 56.9498, 427.538, 1.12089, 25.3951),
+    "WHERE":      ("N*M", 3.178e-09,   0.0108666,      "logistic1", 61.6106, 393.398, 1.53998, 33.416),
+    "TANH":       ("N*M", 1.34214e-09, 0.00499552,     "logistic1", 56.3172, 553.536, 1.00828, 22.1186),
+    "ERF":        ("N*M", 1.34214e-09, 0.00499552,     "logistic1", 63.2964, 550.586, 1.2725,  27.6518),
+    # ---- 计算密集型 ---- use input K
+    "GEMM":       ("N*M*K", 3.23329e-12, 0.00923393,   "logistic1", 94.2941, 516.929, 1.7072,  50.5924),
+    "LINEAR":     ("N*M*K", 3.53285e-12, 0.0103349,    "logistic1", 93.7326, 519.756, 1.58347, 47.3039),
+    "BMM":        ("N*M*K", 3.23329e-12, 0.00923393,   "logistic1", 94.2941, 516.929, 1.7072,  50.5924),
+    # ---- 不对称（N,M 分别作用） ----
+    "SOFTMAX":    ("N,M", 1.72302e-06, 2.91939e-06, 2.58744e-11, 0.00384187,  "logistic2", 48.1421, 570.69,  -0.755547, -0.442078, 13.0659),
+    "REDUCEMEAN": ("N,M", 7.34328e-07, 6.47576e-07, 2.49611e-11, 0.0116988,   "logistic2", 61.9219, 467.778, -0.672083, -0.972062, 20.038),
+    "LAYER_NORM": ("N,M", 2.41765e-06, 2.85593e-06, 3.56326e-12, 0.00538381,  "logistic2", 63.5845, 513.813, -0.947821, -0.49298, 15.8803),
+    "RMSNorm":    ("N,M", 2.41765e-06, 2.85593e-06, 3.56326e-12, 0.00538381,  "logistic2", 63.5845, 513.813, -0.947821, -0.49298, 15.8803),
+    "EMBEDDING":  ("N,M", 6.76365e-09, 8.36773e-06, 0, 0.00121189,            "logistic2", 47.167,  454.384, -0.0348264, -3.05941, 33.9716),
+    # ---- 数据搬运类（几乎常数） ----
+    "RESHAPE":    ("N*M", 0, 0.00201895,                "const", 52.3686),
+    "TRANSPOSE":  ("N*M", 0, 0.00278664,                "const", 50.6483),
+    "SLICE":      ("N*M", 0, 0.00297642,                "const", 49.4025),
+    "EXPAND":     ("N*M", 1.45904e-09, 0.0139601,       "logistic1", 55.4878, 341.649, 1.85321, 42.2219),
+    "CAT":        ("N*M", 4.89748e-09, 0.0117041,       "logistic1", 55.116,  364.295, 1.09685, 23.5387),
+    "KVCacheRead":  ("N*M", 4.89748e-09, 0.0117041,     "logistic1", 55.116, 364.295, 1.09685, 23.5387),
+    "KVCacheWrite": ("N*M", 4.89748e-09, 0.0117041,     "logistic1", 55.116, 364.295, 1.09685, 23.5387),
+    "AllReduce":  ("N*M", 4.89748e-09, 0.0117041,       "logistic1", 55.116, 364.295, 1.09685, 23.5387),
+    "AllGather":  ("N*M", 4.89748e-09, 0.0117041,       "logistic1", 55.116, 364.295, 1.09685, 23.5387),
+    "MemcpyD2D":  ("N*M", 4.89748e-09, 0.0117041,       "logistic1", 55.116, 364.295, 1.09685, 23.5387),
+    "Reduction":  ("N*M", 4.89748e-09, 0.0117041,       "logistic1", 55.116, 364.295, 1.09685, 23.5387),
+    "DROPOUT":    ("N*M", 0, 0.005,                     "const", 50.0),
+    "UNKNOWN":    ("N*M", 0, 0.005,                     "const", 50.0),
 }
 
-def _csv_lookup(t, ins, outs, table):
-    """从 CSV 查找匹配的 per-iter 能量（J）。返回 None 表示未命中。"""
-    iN, iM, iK = extract_mnk_ins(ins, t)
-    oN, oM, oK = extract_mnk_outs(outs)
-
-    # 用 ONNX op_type 直接查
-    key = (t, iN, iM, iK, oN, oM, oK)
-    if key in table:
-        return table[key] / 1000
-
-    # 用 OP_MAP 映射名查
-    csv_name = OP_MAP.get(t)
-    if csv_name:
-        key = (csv_name, iN, iM, iK, oN, oM, oK)
-        if key in table:
-            return table[key] / 1000
-        key0 = (csv_name, iN, iM, 0, oN, oM, 0)
-        if key0 in table:
-            return table[key0] / 1000
-
-    return None
+# ONNX op_type → formula name
+FORMULA_NAME = {
+    "LINEAR": "GEMM", "GEMM": "GEMM", "BMM": "BMM",
+    "ATTENTION": "SOFTMAX", "FLASH_ATTENTION": "SOFTMAX",
+    "SOFTMAX": "SOFTMAX",
+    "LAYER_NORM": "LAYER_NORM", "RMS_NORM": "RMSNorm",
+    "GELU": "GELU", "SILU": "SiLU", "RELU": "RELU", "SIGMOID": "SIGMOID",
+    "REDUCESUM": "REDUCEMEAN", "REDUCEMEAN": "REDUCEMEAN", "MEAN": "REDUCEMEAN",
+    "KV_CACHE_READ": "KVCacheRead", "KV_CACHE_WRITE": "KVCacheWrite",
+    "ADD": "ADD", "MUL": "MUL", "CAT": "CAT", "SLICE": "SLICE", "EXPAND": "EXPAND",
+    "RESHAPE": "RESHAPE", "TRANSPOSE": "TRANSPOSE",
+    "CAST": "CAST", "NEG": "NEG", "POW": "POW",
+    "SQRT": "SQRT", "RECIPROCAL": "RECIPROCAL",
+    "ISNAN": "ISNAN", "WHERE": "WHERE", "EMBEDDING": "EMBEDDING",
+    "DIV": "DIV", "SUB": "ADD",
+}
 
 
-def estimate(node, table):
+def energy_j(N, M, K, formula_key):
+    f = _FORMULAS[formula_key]
+    t_type = f[0]
+
+    # --- time per iter (ms) ---
+    if t_type == "N*M*K":
+        _, a, b, p_type, *prest = f
+        t = a * N * M * K + b
+        prest = (p_type, *prest)
+    elif t_type == "N*M":
+        _, a, b, p_type, *prest = f
+        t = a * N * M + b
+        prest = (p_type, *prest)
+    elif t_type == "N,M":
+        _, a_n, b_m, c_mn, d, p_type, *prest = f
+        t = a_n * N + b_m * M + c_mn * M * N + d
+        prest = (p_type, *prest)
+    else:
+        return 0.0
+
+    t_ms = max(t, 0.0)
+
+    # --- power (W) ---
+    p_type = prest[0]
+    if p_type == "logistic1":
+        _, c, d, p1, p2 = prest
+        p = c + d / (1 + math.exp(-p1 * math.log2(N * M) + p2))
+    elif p_type == "logistic2":
+        _, c, d, p1_n, p2_m, p3 = prest
+        x = p1_n * math.log2(N) + p2_m * math.log2(M)
+        p = c + d / (1 + math.exp(-x + p3))
+    elif p_type == "const":
+        _, v = prest
+        p = v
+    else:
+        return 0.0
+
+    return t_ms * p / 1000  # mJ → J
+
+
+def estimate(node):
     t = node.get("op_type", "UNKNOWN")
     ins = node.get("input_tensors", [])
     outs = node.get("output_tensors", [])
 
-    e = _csv_lookup(t, ins, outs, table)
-    if e is not None:
-        return e
+    key = FORMULA_NAME.get(t)
+    if key is None or key not in _FORMULAS:
+        key = "UNKNOWN"
 
-    # 未命中 → 要求补充 benchmark
     iN, iM, iK = extract_mnk_ins(ins, t)
-    oN, oM, oK = extract_mnk_outs(outs)
-    csv_name = OP_MAP.get(t, t)
-    raise ValueError(
-        f"Missing benchmark: {t} -> {csv_name} "
-        f"({iN},{iM},{iK})->({oN},{oM},{oK}) "
-        f"stage={node.get('stage','?')}  shape_in={[x['shape'] for x in ins]}"
-    )
+
+    if t in ("GEMM", "LINEAR", "BMM"):
+        N, M, K = iN, iM, iK
+    else:
+        N, M, K = extract_mnk_outs(outs)
+
+    if N <= 0 or M <= 0:
+        N, M = max(N, 1), max(M, 1)
+
+    return energy_j(N, M, K, key)
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("-c", "--csv", required=True)
     p.add_argument("-g", "--graph", required=True)
     p.add_argument("-o", "--output", default="", help="输出路径（默认与 graph.json 同目录）")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--gen-len", type=int, default=1)
     args = p.parse_args()
 
-    table = load_operator_energy(args.csv)
     nodes, summary = load_graph(args.graph)
     graph_dir = Path(args.graph).parent
     output_path = Path(args.output) if args.output else graph_dir / "energy_report.txt"
@@ -154,38 +203,18 @@ def main():
         print(f"[energy] {args.graph}: empty")
         return
 
-    if args.verbose:
-        print(f"\n[CSV entries]  {len(table)}")
-        for op in sorted(set(k[0] for k in table)):
-            print(f"  {op}: {sum(1 for k in table if k[0] == op)} dims")
-
-    # 分组
     pf_nodes = [n for n in nodes if n.get("stage") == "prefill"]
     dc_nodes = [n for n in nodes if n.get("stage") == "decode"]
 
-    if args.verbose:
-        print(f"\n[逐算子映射]")
-        print(f"  {'stage':8s} {'op_type':20s} {'→CSV':12s} {'iN,iM,iK':>14s} {'oN,oM,oK':>14s} {'E(mJ)':>8s}")
-        print(f"  {'-'*8} {'-'*20} {'-'*12} {'-'*14} {'-'*14} {'-'*8}")
-        for node in nodes:
-            t = node["op_type"]
-            csv_name = OP_MAP.get(t, t)
-            iN, iM, iK = extract_mnk_ins(node.get("input_tensors", []), t)
-            oN, oM, oK = extract_mnk_outs(node.get("output_tensors", []))
-            e = estimate(node, table)
-            print(f"  {node.get('stage','?'):8s} {t:20s} {csv_name:12s} "
-                  f"({iN},{iM},{iK})  ({oN},{oM},{oK})  {e*1000:>8.4f}")
-
-    # 分阶段计算
     def stage_report(sn):
         op_energy = defaultdict(float)
         op_count = defaultdict(int)
         te = 0.0
         for n in sn:
-            t = n["op_type"]
-            e = estimate(n, table)
-            op_energy[t] += e
-            op_count[t] += 1
+            op = n["op_type"]
+            e = estimate(n)
+            op_energy[op] += e
+            op_count[op] += 1
             te += e
         return op_energy, op_count, te
 
@@ -194,24 +223,19 @@ def main():
         if sn:
             stages.append((label, *stage_report(sn)))
 
-    # 输出
     lines = [
-        "=" * 70,
-        "  Energy Consumption Reconstruction",
-        "=" * 70,
+        "=" * 70, "  Energy Consumption Reconstruction", "=" * 70,
         f"  Graph:  {args.graph}",
         f"  Nodes:  {len(nodes)}  (prefill: {len(pf_nodes)} + decode: {len(dc_nodes)})",
         f"  Generation length: {args.gen_len} tokens",
-        f"  CSV entries: {len(table)}",
     ]
 
     gt = 0.0
     for label, op_energy, op_count, total in stages:
         mul = args.gen_len if label == "Decode" else 1
-        n_count = sum(op_count.values())
         disp = f"{label} (per token)" if mul > 1 else label
         lines += ["", f"  --- {disp} ---",
-                  f"  Nodes: {n_count:>6d}",
+                  f"  Nodes: {sum(op_count.values()):>6d}",
                   f"  Energy:  {total:.4f}J ({total*1000:.2f}mJ)"]
         gt += total * mul
 
@@ -219,7 +243,7 @@ def main():
               f"  Aggregated (prefill + decode x{args.gen_len}):",
               f"  Total: {gt:.4f}J ({gt*1000:.2f}mJ)"]
 
-    for label, op_energy, op_count, total, pe, ae in stages:
+    for label, op_energy, op_count, total in stages:
         mul = args.gen_len if label == "Decode" else 1
         disp = f"{label} (per token)" if mul > 1 else label
         lines += ["", f"  {disp} operators:",
@@ -229,11 +253,17 @@ def main():
             c = op_count[op]
             lines.append(f"  {op:25s} {c:>5d} {e*1000:>10.4f}  {e/total*100:>5.1f}%")
 
-    lines += ["", "  Note: Per-operator energy looked up from benchmark CSV by exact dimensions."]
+    lines += ["", "  Note: Energy estimated from benchmark fitting formulas."]
     text = "\n".join(lines)
     print(text)
     output_path.write_text(text, encoding="utf-8")
     print(f"  -> saved to {output_path}")
+
+
+def load_graph(graph_path):
+    with open(graph_path, encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("nodes", []), data.get("summary", {})
 
 
 if __name__ == "__main__":
