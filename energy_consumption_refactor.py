@@ -72,8 +72,7 @@ def load_operator_energy(csv_path):
             )
             table[key] = float(row[col])  # mJ
 
-    aux = min(v for v in table.values()) if table else 0.0
-    return table, aux
+    return table
 
 
 def load_graph(graph_path):
@@ -95,16 +94,6 @@ OP_MAP = {
     "ADD": "MemcpyD2D", "MUL": "MemcpyD2D",
 }
 
-# 辅助算子 — 图分解产物，无独立测试数据
-AUXILIARY_OPS = {
-    "ADD", "MUL", "RESHAPE", "CAST", "TRANSPOSE",
-    "POW", "SQRT", "RECIPROCAL", "SLICE", "NEG",
-    "CAT", "EXPAND", "ISNAN", "WHERE", "EMBEDDING",
-    "SHAPE", "GATHER", "UNSQUEEZE", "SQUEEZE", "PAD",
-    "DIV", "SUB", "EQUAL", "IDENTITY", "CONSTANT",
-}
-
-
 def _csv_lookup(t, ins, outs, table):
     """从 CSV 查找匹配的 per-iter 能量（J）。返回 None 表示未命中。"""
     iN, iM, iK = extract_mnk_ins(ins, t)
@@ -125,33 +114,27 @@ def _csv_lookup(t, ins, outs, table):
         if key0 in table:
             return table[key0] / 1000
 
-    # 通配：同名首条
-    for k, v in table.items():
-        if k[0] == (csv_name or t):
-            return v / 1000
     return None
 
 
-def estimate(node, table, aux_fb):
+def estimate(node, table):
     t = node.get("op_type", "UNKNOWN")
-    mem = node.get("memory_bytes", 0) or 0
     ins = node.get("input_tensors", [])
     outs = node.get("output_tensors", [])
 
-    # 1) CSV 精确查找优先
     e = _csv_lookup(t, ins, outs, table)
     if e is not None:
         return e
 
-    # 2) 辅助算子按 mem 缩放
-    if t in AUXILIARY_OPS:
-        if mem > 0:
-            unit_mem = 16384
-            return aux_fb * max(1.0, mem / unit_mem)
-        return aux_fb
-
-    # 3) fallback
-    return mem / 1e6 * 0.01
+    # 未命中 → 要求补充 benchmark
+    iN, iM, iK = extract_mnk_ins(ins, t)
+    oN, oM, oK = extract_mnk_outs(outs)
+    csv_name = OP_MAP.get(t, t)
+    raise ValueError(
+        f"Missing benchmark: {t} -> {csv_name} "
+        f"({iN},{iM},{iK})->({oN},{oM},{oK}) "
+        f"stage={node.get('stage','?')}  shape_in={[x['shape'] for x in ins]}"
+    )
 
 
 def main():
@@ -163,7 +146,7 @@ def main():
     p.add_argument("--gen-len", type=int, default=1)
     args = p.parse_args()
 
-    table, aux = load_operator_energy(args.csv)
+    table = load_operator_energy(args.csv)
     nodes, summary = load_graph(args.graph)
     graph_dir = Path(args.graph).parent
     output_path = Path(args.output) if args.output else graph_dir / "energy_report.txt"
@@ -172,7 +155,7 @@ def main():
         return
 
     if args.verbose:
-        print(f"\n[CSV entries]  {len(table)}  (aux_fb = {aux:.4f}mJ)")
+        print(f"\n[CSV entries]  {len(table)}")
         for op in sorted(set(k[0] for k in table)):
             print(f"  {op}: {sum(1 for k in table if k[0] == op)} dims")
 
@@ -189,7 +172,7 @@ def main():
             csv_name = OP_MAP.get(t, t)
             iN, iM, iK = extract_mnk_ins(node.get("input_tensors", []), t)
             oN, oM, oK = extract_mnk_outs(node.get("output_tensors", []))
-            e = estimate(node, table, aux)
+            e = estimate(node, table)
             print(f"  {node.get('stage','?'):8s} {t:20s} {csv_name:12s} "
                   f"({iN},{iM},{iK})  ({oN},{oM},{oK})  {e*1000:>8.4f}")
 
@@ -197,18 +180,14 @@ def main():
     def stage_report(sn):
         op_energy = defaultdict(float)
         op_count = defaultdict(int)
-        pe = ae = te = 0.0
+        te = 0.0
         for n in sn:
             t = n["op_type"]
-            e = estimate(n, table, aux)
+            e = estimate(n, table)
             op_energy[t] += e
             op_count[t] += 1
             te += e
-            if t in AUXILIARY_OPS:
-                ae += e
-            else:
-                pe += e
-        return op_energy, op_count, te, pe, ae
+        return op_energy, op_count, te
 
     stages = []
     for label, sn in [("Prefill", pf_nodes), ("Decode", dc_nodes)]:
@@ -223,28 +202,22 @@ def main():
         f"  Graph:  {args.graph}",
         f"  Nodes:  {len(nodes)}  (prefill: {len(pf_nodes)} + decode: {len(dc_nodes)})",
         f"  Generation length: {args.gen_len} tokens",
-        f"  CSV entries: {len(table)}, aux_fb = {aux:.4f}mJ",
+        f"  CSV entries: {len(table)}",
     ]
 
-    gt = gp = ga = 0.0
-    for label, op_energy, op_count, total, pe, ae in stages:
+    gt = 0.0
+    for label, op_energy, op_count, total in stages:
         mul = args.gen_len if label == "Decode" else 1
         n_count = sum(op_count.values())
         disp = f"{label} (per token)" if mul > 1 else label
         lines += ["", f"  --- {disp} ---",
                   f"  Nodes: {n_count:>6d}",
-                  f"  Energy:  {total:.4f}J ({total*1000:.2f}mJ)",
-                  f"    ├─ Primary: {pe:.4f}J ({pe/total*100:.1f}%)",
-                  f"    └─ Aux: {ae:.4f}J ({ae/total*100:.1f}%)"]
+                  f"  Energy:  {total:.4f}J ({total*1000:.2f}mJ)"]
         gt += total * mul
-        gp += pe * mul
-        ga += ae * mul
 
     lines += ["", "-" * 70,
               f"  Aggregated (prefill + decode x{args.gen_len}):",
-              f"  Total: {gt:.4f}J ({gt*1000:.2f}mJ)",
-              f"    ├─ Primary: {gp:.4f}J ({gp/gt*100:.1f}%)",
-              f"    └─ Aux: {ga:.4f}J ({ga/gt*100:.1f}%)"]
+              f"  Total: {gt:.4f}J ({gt*1000:.2f}mJ)"]
 
     for label, op_energy, op_count, total, pe, ae in stages:
         mul = args.gen_len if label == "Decode" else 1
@@ -255,11 +228,6 @@ def main():
         for op, e in sorted(op_energy.items(), key=lambda x: -x[1]):
             c = op_count[op]
             lines.append(f"  {op:25s} {c:>5d} {e*1000:>10.4f}  {e/total*100:>5.1f}%")
-        pe_sub = sum(e for op, e in op_energy.items() if op not in AUXILIARY_OPS)
-        ae_sub = sum(e for op, e in op_energy.items() if op in AUXILIARY_OPS)
-        lines += [f"  {'-'*48}",
-                  f"  {'Primary subtotal':25s} {'':>5s} {pe_sub*1000:>10.4f}  {pe_sub/total*100:>5.1f}%",
-                  f"  {'Aux subtotal':25s} {'':>5s} {ae_sub*1000:>10.4f}  {ae_sub/total*100:>5.1f}%"]
 
     lines += ["", "  Note: Per-operator energy looked up from benchmark CSV by exact dimensions."]
     text = "\n".join(lines)
