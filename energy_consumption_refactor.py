@@ -135,14 +135,17 @@ def energy_j(N, M, K, formula_key):
         _, a, b, p_type, *prest = f
         t = a * N * M * K + b
         prest = (p_type, *prest)
+        size = N * M * K  # power 公式也用 N*M*K
     elif t_type == "N*M":
         _, a, b, p_type, *prest = f
         t = a * N * M + b
         prest = (p_type, *prest)
+        size = N * M
     elif t_type == "N,M":
         _, a_n, b_m, c_mn, d, p_type, *prest = f
         t = a_n * N + b_m * M + c_mn * M * N + d
         prest = (p_type, *prest)
+        size = N * M
     else:
         return 0.0
 
@@ -152,7 +155,7 @@ def energy_j(N, M, K, formula_key):
     p_type = prest[0]
     if p_type == "logistic1":
         _, c, d, p1, p2 = prest
-        p = c + d / (1 + math.exp(-p1 * math.log2(N * M) + p2))
+        p = c + d / (1 + math.exp(-p1 * math.log2(max(size, 1)) + p2))
     elif p_type == "logistic2":
         _, c, d, p1_n, p2_m, p3 = prest
         x = p1_n * math.log2(N) + p2_m * math.log2(M)
