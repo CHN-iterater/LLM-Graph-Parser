@@ -334,7 +334,10 @@ def run_pytorch_mode():
     write_energy("prefill_start", ts_path)
     print(f"  [Phase 1/3] Prefill (profiling, {PROFILING_RUNS} runs)")
     if HARDWARE_PROFILING and profiler.available:
-        _ = profiler.time_forward(model, prompt_ids, label="prefill", num_runs=PROFILING_RUNS)
+        pf_kwargs = {}
+        if attention_mask is not None:
+            pf_kwargs["attention_mask"] = attention_mask
+        _ = profiler.time_forward(model, prompt_ids, label="prefill", num_runs=PROFILING_RUNS, **pf_kwargs)
     if HARDWARE_PROFILING and profiler.available:
         total_gpu_us = profiler._prefill_total_us * PROFILING_RUNS
         print(f"    time={profiler._prefill_total_us/1000:.2f}ms (per run), total GPU time={total_gpu_us/1000:.2f}ms")
@@ -354,18 +357,22 @@ def run_pytorch_mode():
     decode_token = prompt_ids[:, -1:]
     decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
     if HARDWARE_PROFILING and profiler.available:
+        # 准备 decode 时需要的额外参数（attention_mask 等）
+        dc_kwargs = {}
+        if attention_mask is not None:
+            dc_kwargs["attention_mask"] = attention_mask[:, -1:]
         print(f"  [warmup decode] running 2s forward passes...", end=" ", flush=True)
         t0 = time.time()
         with torch.no_grad():
             while (time.time() - t0) < 2.0:
-                _ = model(decode_token)
+                _ = model(decode_token, **dc_kwargs)
                 torch.cuda.synchronize()
         time.sleep(1.0)
         print(f"done, starting measurement")
     write_timestamp("decode_start", ts_path)
     write_energy("decode_start", ts_path)
     if HARDWARE_PROFILING and profiler.available:
-        _ = profiler.time_forward(model, decode_token, label="decode", num_runs=PROFILING_RUNS)
+        _ = profiler.time_forward(model, decode_token, label="decode", num_runs=PROFILING_RUNS, **dc_kwargs)
         total_dc_gpu_us = profiler._decode_total_us * PROFILING_RUNS
         with open(ts_path, "a") as tf:
             tf.write(f"decode_gpu_us {int(total_dc_gpu_us)}\n")

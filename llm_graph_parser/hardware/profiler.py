@@ -34,7 +34,7 @@ class HardwareProfiler:
     # ------------------------------------------------------------------
 
     def time_forward(self, model, input_ids, label: str = "forward",
-                     num_runs: int = 1) -> float:
+                     num_runs: int = 1, **model_kwargs) -> float:
         """Run forward pass(es), return avg elapsed time in us."""
         if not self._available:
             return 0.0
@@ -48,7 +48,7 @@ class HardwareProfiler:
         start.record()
         with torch.no_grad():
             for _ in range(num_runs):
-                _ = model(input_ids)
+                _ = model(input_ids, **model_kwargs)
                 torch.cuda.synchronize()
         end.record()
         torch.cuda.synchronize()
