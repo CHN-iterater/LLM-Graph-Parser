@@ -47,7 +47,7 @@ def _parse_energy(lines: list[str], section_start: int) -> float | None:
     import re
     for i in range(section_start + 1, min(section_start + 5, len(lines))):
         if "Energy:" in lines[i]:
-            m = re.search(r"Energy:\s+(\d+\.\d+)\s+J", lines[i])
+            m = re.search(r"Energy:\s+(\d+\.\d+)J", lines[i])
             if m:
                 return float(m.group(1))
     return None
