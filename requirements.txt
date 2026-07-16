@@ -4,7 +4,7 @@ onnx>=1.16
 onnxscript>=0.1.0
 
 # 模型加载
-transformers>=4.49.0,<5.0.0
+transformers>=4.49.0,<4.50.0
 accelerate>=0.30.0
 safetensors>=0.4.0
 
