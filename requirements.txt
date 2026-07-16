@@ -4,9 +4,12 @@ onnx>=1.16
 onnxscript>=0.1.0
 
 # 模型加载
-transformers>=4.40.0
+transformers>=4.49.0,<5.0.0
 accelerate>=0.30.0
 safetensors>=0.4.0
+
+# tokenizers 版本锁定 (transformers 依赖, 特定模型需要 0.22~0.23.0)
+tokenizers>=0.22.0,<=0.23.0
 
 # 各类 Tokenizer（不同模型可能需要不同的 tokenizer 库）
 sentencepiece>=0.2.0
