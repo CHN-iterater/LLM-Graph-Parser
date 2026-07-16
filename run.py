@@ -262,10 +262,10 @@ def run_pytorch_mode():
     write_energy("idle_before_end", ts_path)
 
     print(f"\n加载模型: {MODEL_SOURCE}")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE, local_files_only=False)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE, local_files_only=True)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE, local_files_only=False)
     model.eval()
     print(f"  参数总量: {sum(p.numel() for p in model.parameters()):,}")
 
