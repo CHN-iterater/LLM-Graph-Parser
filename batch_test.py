@@ -71,10 +71,7 @@ def main():
 
     models = args.models or DEFAULT_MODELS
     results = []
-    csv_path = BASE_DIR / ".." / "single_operator_summary.csv"
 
-    if not csv_path.exists():
-        print(f"\n  [WARN] {csv_path} not found — energy_consumption_refactor will be skipped")
     if not OUTPUT_DIR.exists():
         OUTPUT_DIR.mkdir(parents=True)
 
@@ -83,7 +80,6 @@ def main():
     print(f"  Prompt: {args.prompt}")
     print(f"  Max new tokens: {args.max_new_tokens}")
     print(f"  Profiling runs: {args.runs}")
-    print(f"  CSV: {'found' if csv_path.exists() else 'missing'}")
     print(f"{'#' * 70}")
 
     # 汇总结果：模型 → { "pf1": ..., "pf2": ..., "dc1": ..., "dc2": ... }
@@ -138,7 +134,6 @@ def main():
         # Step 3: energy_consumption_refactor.py（捕获输出以解析方向 1 能耗）
         ok, ec_out = run_cmd(
             [sys.executable, "energy_consumption_refactor.py",
-             "-c", str(BASE_DIR / ".." / "operator_energy_comparison.csv"),
              "-g", str(graph_path),
              "--gen-len", str(args.gen_len)],
             f"{model_name}: energy_consumption_refactor", capture=True)
