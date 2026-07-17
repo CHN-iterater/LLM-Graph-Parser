@@ -102,7 +102,9 @@ ONNX_PATH = "path/to/model.onnx"
 
 # ---- 硬件参数 ----
 HARDWARE = {"peak_flops": 1979e12, "memory_bw": 3350e9}  # H100
-HARDWARE_PROFILING = False                # True = 用 torch.profiler 捕获 CUDA Kernel（需 GPU）
+HARDWARE_PROFILING = False                # True = GPU profiling via torch.profiler
+PROFILING_RUNS = 20                       # Prefill / Decode repeat count
+GEN_REPEATS = 50                          # Generation per-step forward repeats (higher = less noise)
 ```
 
 ---
@@ -216,6 +218,7 @@ output/模型名_时间戳/
 ├── kvcache_report.txt      ← KV cache 跨输入依赖 (仅 PyTorch)
 ├── hardware_report.txt     ← GPU Kernel 级分解报告 (需 HARDWARE_PROFILING=True)
 ├── kernel_trace.json       ← 原始 CUDA Kernel 事件列表
+├── per_token_energy.txt    ← 生成阶段逐 token 能耗 + 增长率
 ├── prefill_graph.json      ← Prefill 子图 (仅 PyTorch)
 └── decode_graph.json       ← Decode 子图 (仅 PyTorch)
 ```
@@ -248,41 +251,38 @@ h100 = HardwareProfile(name="H100-SXM", peak_flops_fp16=1979e12,
 
 ## 能耗重构（可选）
 
-将单算子 benchmark 能耗映射回计算图 DAG，重构推理总能耗。详见 [LLM_Graph_Parser.md](LLM_Graph_Parser.md) 第十章。
+将算子级能耗映射回计算图 DAG，重构推理总能耗并交叉验证方向 1（公式拟合）和方向 2（硬件计数器）。详见 [LLM_Graph_Parser.md](LLM_Graph_Parser.md) 第十章。
 
-### 方向 1: 算子级重构
+### 方向 1: 公式法重构
+
+基于 benchmark 的算子拟合公式估算每算子能耗：
 
 ```bash
 python energy_consumption_refactor.py \
-    -c ../single_operator_summary.csv \
     -g output/ModelName_timestamp/graph.json \
     --gen-len 20
 ```
 
-### 方向 2: GPU 功耗采集
+### 方向 2: 硬件计数器测量
 
-终端 1 — 启动功耗采样：
+nvml 硬件能量计数器直接读取 GPU 总能耗。Prefill/Decode 阶段各重复 PROFILING_RUNS 次取平均，生成阶段逐 token 测量：
+
 ```bash
-python power_monitor.py -i 100 -o power.txt
+python run.py --runs 20 --gen-repeats 50
+python power_analyze.py -t output/ModelName_timestamp/timestamps.txt -n 20
 ```
 
-终端 2 — 运行推理（会被方向 1 自动调用）：
-```bash
-python run.py
-```
+### 逐 token 能耗
 
-分析结果：
-```bash
-python power_analyze.py -t timestamps.txt -p power.txt -n 20
-```
+生成阶段自动输出 `per_token_energy.txt`，记录每个 token 的能耗(J)、耗时(s)、较上一步增长率。
 
 ### 相关脚本
 
 | 脚本 | 用途 | 位置 |
 |------|------|------|
-| `energy_consumption_refactor.py` | 方向 1: 算子能耗重构 | `LLM_Graph_Parser/` |
-| `power_monitor.py` | 方向 2: GPU 功耗采样 | `LLM_Graph_Parser/` |
-| `power_analyze.py` | 方向 2: 功耗分析 | `LLM_Graph_Parser/` |
+| `energy_consumption_refactor.py` | 方向 1: 公式法算子能耗重构 | `LLM_Graph_Parser/` |
+| `power_analyze.py` | 方向 2: 硬件计数器分析 | `LLM_Graph_Parser/` |
+| `batch_test.py` | 批量跑多模型对比 | `LLM_Graph_Parser/` |
 
 ---
 
