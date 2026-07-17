@@ -403,20 +403,118 @@ def run_pytorch_mode():
         write_timestamp("gen_start", ts_path)
         write_energy("gen_start", ts_path)
         print(f"  [Phase 3/3] Generating (max {MAX_NEW_TOKENS})...")
+
+        # 从 idle_before 计算基准功率（与 power_analyze.py 一致）
+        P_bl = 80.0
+        with open(ts_path) as f:
+            ib_start_e = ib_end_e = None
+            for line in f:
+                if "idle_before_start_energy_j" in line:
+                    ib_start_e = float(line.strip().split()[1])
+                elif "idle_before_end_energy_j" in line:
+                    ib_end_e = float(line.strip().split()[1])
+            if ib_start_e is not None and ib_end_e is not None:
+                P_bl = (ib_end_e - ib_start_e) / 2.0
+
+        from transformers.generation import LogitsProcessorList, StoppingCriteriaList
+        import copy
+
+        # 和 generate() 内部一样：深拷贝 + 预处理 config
+        gen_config = copy.deepcopy(model.generation_config)
+        # generate() 的 _prepare_generation_config 会设这些 tensor 属性
+        if hasattr(gen_config, "eos_token_id") and gen_config.eos_token_id is not None:
+            eos_ids = gen_config.eos_token_id if isinstance(gen_config.eos_token_id, list) else [gen_config.eos_token_id]
+            gen_config._eos_token_tensor = torch.tensor(eos_ids, dtype=torch.long)
+        if hasattr(gen_config, "pad_token_id") and gen_config.pad_token_id is not None:
+            gen_config._pad_token_tensor = torch.tensor(gen_config.pad_token_id, dtype=torch.long)
+
+        logits_processor = model._get_logits_processor(
+            generation_config=gen_config,
+            input_ids_seq_length=prompt_ids.shape[1],
+            encoder_input_ids=prompt_ids,
+            prefix_allowed_tokens_fn=None,
+            logits_processor=LogitsProcessorList(),
+        )
+        stopping_criteria = model._get_stopping_criteria(
+            generation_config=gen_config,
+            stopping_criteria=StoppingCriteriaList(),
+        )
+
+        # 逐位置生成 + 测量：每个位置重复 PROFILING_RUNS 次 forward（KV cache 不变态）
+        # 确保 nvml 计数器窗口足够长
+        input_ids = prompt_ids.clone()
+        model_kwargs_gen = {"use_cache": True}
+        if attention_mask is not None:
+            model_kwargs_gen["attention_mask"] = attention_mask.clone()
+        token_data = []
+        generated_ids = []
+
         with torch.no_grad():
-            kw = dict(max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
-            if attention_mask is not None:
-                kw["attention_mask"] = attention_mask
-            for k, v in model.generation_config.to_dict().items():
-                if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
-                    kw[k] = v
-            out = model.generate(prompt_ids, **kw)
-        gen_len = out.shape[1] - seq_len
-        answer = tokenizer.decode(out[0, seq_len:], skip_special_tokens=True).strip()
+            for step in range(MAX_NEW_TOKENS):
+                # PROFILING_RUNS 次重复（维持相同 cache 状态）
+                e_before = read_energy_j()
+                t_before = time.time()
+                for _ in range(PROFILING_RUNS):
+                    model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
+                    outputs = model(**model_inputs, return_dict=True)
+                    torch.cuda.synchronize()
+                    del outputs
+                e_after = read_energy_j()
+                dt = time.time() - t_before
+
+                raw_per_forward = (e_after - e_before) - P_bl * dt
+                e_step = max(raw_per_forward / PROFILING_RUNS, 0.0)
+
+                # 真正一次 forward 更新状态 + 选 token
+                model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
+                outputs = model(**model_inputs, return_dict=True)
+                model_kwargs_gen = model._update_model_kwargs_for_generation(
+                    outputs, model_kwargs_gen,
+                    is_encoder_decoder=model.config.is_encoder_decoder,
+                )
+                logits = outputs.logits[:, -1, :].float()
+                scores = logits_processor(input_ids, logits)
+                next_token = torch.argmax(scores, dim=-1, keepdim=True)
+                input_ids = torch.cat([input_ids, next_token], dim=-1)
+
+                generated_ids.append(next_token[0, 0].item())
+                token_data.append((step, e_step, dt / PROFILING_RUNS))
+
+                if stopping_criteria(input_ids, None):
+                    break
+                del outputs
+
+        gen_len = len(generated_ids)
+
+        answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
         print(f"    generated: {gen_len} tokens")
         print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
         if gen_len == 0:
             print("    (no output - model may need different prompts)")
+
+        # 逐 token 能耗输出
+        print(f"\n  Per-token energy (P_bl={P_bl:.1f}W, each averaged over {PROFILING_RUNS} forwards):")
+        print(f"  {'Token':>6s}  {'Energy(J)':>10s}  {'dt(s)':>8s}  {'Growth(%)':>10s}")
+        print(f"  {'-' * 40}")
+        prev = None
+        for pos, e, dt in token_data:
+            g = (e / prev - 1) * 100 if prev else None
+            gs = f"{g:>+9.2f}" if g is not None else "      --"
+            print(f"  {pos+1:>6d}  {e:>8.4f}  {dt:>6.4f}  {gs:>10s}")
+            prev = e
+
+        energy_path = os.path.join(output_dir, "per_token_energy.txt")
+        with open(energy_path, "w") as f:
+            f.write(f"# P_bl={P_bl:.1f}W  total_tokens={gen_len}  forwards_per_step={PROFILING_RUNS}\n")
+            f.write(f"# Token  Energy(J)  dt(s)  Growth(%)\n")
+            prev = None
+            for pos, e, dt in token_data:
+                g = (e / prev - 1) * 100 if prev else None
+                gs = f"{g:+.2f}" if g is not None else "--"
+                f.write(f"{pos+1}  {e:.6f}  {dt:.4f}  {gs}\n")
+                prev = e
+        print(f"    -> saved to {energy_path}")
+
         write_energy("gen_end", ts_path)
         write_timestamp("gen_end", ts_path)
 
