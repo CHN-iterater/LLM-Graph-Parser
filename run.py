@@ -441,26 +441,23 @@ def run_pytorch_mode():
         )
 
         input_ids = prompt_ids.clone()
-        past_key_values = None
-        token_data = []  # (position, energy_J, dt_s)
+        model_kwargs_gen = {"use_cache": True}
+        if attention_mask is not None:
+            model_kwargs_gen["attention_mask"] = attention_mask.clone()
+        token_data = []
         generated_ids = []
-
-        attn_mask = attention_mask.clone() if attention_mask is not None else None
 
         with torch.no_grad():
             for step in range(MAX_NEW_TOKENS):
                 e_before = read_energy_j()
                 t_before = time.time()
 
-                model_kwargs_in = {
-                    "past_key_values": past_key_values,
-                    "use_cache": True,
-                }
-                if attn_mask is not None:
-                    model_kwargs_in["attention_mask"] = attn_mask
-                model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_in)
+                model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
                 outputs = model(**model_inputs, return_dict=True)
-                past_key_values = outputs.past_key_values
+                model_kwargs_gen = model._update_model_kwargs_for_generation(
+                    outputs, model_kwargs_gen,
+                    is_encoder_decoder=model.config.is_encoder_decoder,
+                )
 
                 logits = outputs.logits[:, -1, :].float()
                 scores = logits_processor(input_ids, logits)
@@ -471,29 +468,19 @@ def run_pytorch_mode():
                 else:
                     next_token = torch.argmax(scores, dim=-1, keepdim=True)
 
-                # 准备下一轮输入（prepare_inputs_for_generation 后续轮只取最后一位）
-                next_token_id = next_token[0, 0].item()
-                generated_ids.append(next_token_id)
-                next_input = next_token.to(input_ids.device)
-
-                if attn_mask is not None:
-                    attn_mask = torch.cat([attn_mask, torch.ones_like(next_input)], dim=-1)
-
-                del input_ids
-                input_ids = next_input
+                input_ids = torch.cat([input_ids, next_token], dim=-1)
 
                 torch.cuda.synchronize()
                 e_after = read_energy_j()
                 dt = time.time() - t_before
                 e_step = max((e_after - e_before) - P_bl * dt, 0.0)
 
+                generated_ids.append(next_token[0, 0].item())
                 token_data.append((step, e_step, dt))
 
-                # 检查停止条件
-                # _sample 中 stopping_criteria 拿完整序列判断，这里构造完整序列
-                full_ids = torch.cat([prompt_ids, torch.tensor(generated_ids, device=prompt_ids.device).unsqueeze(0)], dim=-1)
-                if stopping_criteria(full_ids, None):
+                if stopping_criteria(input_ids, None):
                     break
+                del outputs
 
         gen_len = len(generated_ids)
         answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
