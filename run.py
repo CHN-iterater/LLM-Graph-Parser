@@ -480,6 +480,9 @@ def run_pytorch_mode():
                 generated_ids.append(next_token[0, 0].item())
                 token_data.append((step, e_step, dt / PROFILING_RUNS))
 
+                # 冷却 2s，让 GPU 温度在每步间恢复
+                time.sleep(2.0)
+
                 if stopping_criteria(input_ids, None):
                     break
                 del outputs
