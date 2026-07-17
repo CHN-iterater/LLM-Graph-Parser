@@ -403,20 +403,119 @@ def run_pytorch_mode():
         write_timestamp("gen_start", ts_path)
         write_energy("gen_start", ts_path)
         print(f"  [Phase 3/3] Generating (max {MAX_NEW_TOKENS})...")
+
+        # 从 idle_before 计算基准功率（与 power_analyze.py 一致）
+        P_bl = 80.0
+        with open(ts_path) as f:
+            ib_start_e = ib_end_e = None
+            for line in f:
+                if "idle_before_start_energy_j" in line:
+                    ib_start_e = float(line.strip().split()[1])
+                elif "idle_before_end_energy_j" in line:
+                    ib_end_e = float(line.strip().split()[1])
+            if ib_start_e is not None and ib_end_e is not None:
+                P_bl = (ib_end_e - ib_start_e) / 2.0
+
+        from transformers.generation import LogitsProcessorList, StoppingCriteriaList
+
+        # 构造和 model.generate() 相同的 logits 处理器
+        logits_processor = model._get_logits_processor(
+            generation_config=model.generation_config,
+            input_ids_seq_length=prompt_ids.shape[1],
+            encoder_input_ids=prompt_ids,
+            prefix_allowed_tokens_fn=None,
+            logits_processor=LogitsProcessorList(),
+        )
+        stopping_criteria = model._get_stopping_criteria(
+            generation_config=model.generation_config,
+            stopping_criteria=StoppingCriteriaList(),
+        )
+
+        input_ids = prompt_ids.clone()
+        past_key_values = None
+        token_data = []  # (position, energy_J, dt_s)
+        generated_ids = []
+
+        attn_mask = attention_mask.clone() if attention_mask is not None else None
+
         with torch.no_grad():
-            kw = dict(max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
-            if attention_mask is not None:
-                kw["attention_mask"] = attention_mask
-            for k, v in model.generation_config.to_dict().items():
-                if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
-                    kw[k] = v
-            out = model.generate(prompt_ids, **kw)
-        gen_len = out.shape[1] - seq_len
-        answer = tokenizer.decode(out[0, seq_len:], skip_special_tokens=True).strip()
+            for step in range(MAX_NEW_TOKENS):
+                e_before = read_energy_j()
+                t_before = time.time()
+
+                model_kwargs_in = {
+                    "past_key_values": past_key_values,
+                    "use_cache": True,
+                }
+                if attn_mask is not None:
+                    model_kwargs_in["attention_mask"] = attn_mask
+                model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_in)
+                outputs = model(**model_inputs, return_dict=True)
+                past_key_values = outputs.past_key_values
+
+                logits = outputs.logits[:, -1, :].float()
+                scores = logits_processor(input_ids, logits)
+
+                if model.generation_config.do_sample:
+                    probs = torch.nn.functional.softmax(scores, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1)
+                else:
+                    next_token = torch.argmax(scores, dim=-1, keepdim=True)
+
+                # 准备下一轮输入（prepare_inputs_for_generation 后续轮只取最后一位）
+                next_token_id = next_token[0, 0].item()
+                generated_ids.append(next_token_id)
+                next_input = next_token.to(input_ids.device)
+
+                if attn_mask is not None:
+                    attn_mask = torch.cat([attn_mask, torch.ones_like(next_input)], dim=-1)
+
+                del input_ids
+                input_ids = next_input
+
+                torch.cuda.synchronize()
+                e_after = read_energy_j()
+                dt = time.time() - t_before
+                e_step = max((e_after - e_before) - P_bl * dt, 0.0)
+
+                token_data.append((step, e_step, dt))
+
+                # 检查停止条件
+                # _sample 中 stopping_criteria 拿完整序列判断，这里构造完整序列
+                full_ids = torch.cat([prompt_ids, torch.tensor(generated_ids, device=prompt_ids.device).unsqueeze(0)], dim=-1)
+                if stopping_criteria(full_ids, None):
+                    break
+
+        gen_len = len(generated_ids)
+        answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
         print(f"    generated: {gen_len} tokens")
         print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
         if gen_len == 0:
             print("    (no output - model may need different prompts)")
+
+        # 逐 token 能耗输出
+        print(f"\n  Per-token energy (P_bl={P_bl:.1f}W):")
+        print(f"  {'Token':>6s}  {'Energy(J)':>10s}  {'dt(s)':>8s}  {'Growth(%)':>10s}")
+        print(f"  {'-' * 40}")
+        prev = None
+        for pos, e, dt in token_data:
+            g = (e / prev - 1) * 100 if prev else None
+            gs = f"{g:>+9.2f}" if g is not None else "      --"
+            print(f"  {pos+1:>6d}  {e:>8.4f}  {dt:>6.4f}  {gs:>10s}")
+            prev = e
+
+        energy_path = os.path.join(output_dir, "per_token_energy.txt")
+        with open(energy_path, "w") as f:
+            f.write(f"# P_bl={P_bl:.1f}W  total_tokens={gen_len}\n")
+            f.write(f"# Token  Energy(J)  dt(s)  Growth(%)\n")
+            prev = None
+            for pos, e, dt in token_data:
+                g = (e / prev - 1) * 100 if prev else None
+                gs = f"{g:+.2f}" if g is not None else "--"
+                f.write(f"{pos+1}  {e:.6f}  {dt:.4f}  {gs}\n")
+                prev = e
+        print(f"    -> saved to {energy_path}")
+
         write_energy("gen_end", ts_path)
         write_timestamp("gen_end", ts_path)
 
