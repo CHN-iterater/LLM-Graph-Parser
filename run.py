@@ -1,5 +1,5 @@
 """LLM Graph Parser — 完整推理流程阶段分析。"""
-import os, logging
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -417,29 +417,28 @@ def run_pytorch_mode():
                 P_bl = (ib_end_e - ib_start_e) / 2.0
 
         from transformers.generation import LogitsProcessorList, StoppingCriteriaList
+        import copy
+
+        # 和 generate() 内部一样：深拷贝 + 预处理 config
+        gen_config = copy.deepcopy(model.generation_config)
+        # generate() 的 _prepare_generation_config 会设这些 tensor 属性
+        if hasattr(gen_config, "eos_token_id") and gen_config.eos_token_id is not None:
+            eos_ids = gen_config.eos_token_id if isinstance(gen_config.eos_token_id, list) else [gen_config.eos_token_id]
+            gen_config._eos_token_tensor = torch.tensor(eos_ids, dtype=torch.long)
+        if hasattr(gen_config, "pad_token_id") and gen_config.pad_token_id is not None:
+            gen_config._pad_token_tensor = torch.tensor(gen_config.pad_token_id, dtype=torch.long)
 
         logits_processor = model._get_logits_processor(
-            generation_config=model.generation_config,
+            generation_config=gen_config,
             input_ids_seq_length=prompt_ids.shape[1],
             encoder_input_ids=prompt_ids,
             prefix_allowed_tokens_fn=None,
             logits_processor=LogitsProcessorList(),
         )
-
-        # 用 try 兼容 _get_stopping_criteria 在不同 transformers 版本中的差异
-        try:
-            stopping_criteria = model._get_stopping_criteria(
-                generation_config=model.generation_config,
-                stopping_criteria=StoppingCriteriaList(),
-            )
-        except (AttributeError, TypeError):
-            eos = model.generation_config.eos_token_id or getattr(tokenizer, "eos_token_id", None) or []
-            if not isinstance(eos, list):
-                eos = [eos]
-            class _EosStop:
-                def __call__(self, ids, *a, **kw):
-                    return ids[:, -1].item() in eos
-            stopping_criteria = _EosStop()
+        stopping_criteria = model._get_stopping_criteria(
+            generation_config=gen_config,
+            stopping_criteria=StoppingCriteriaList(),
+        )
 
         input_ids = prompt_ids.clone()
         past_key_values = None
