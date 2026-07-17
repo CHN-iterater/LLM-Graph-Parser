@@ -21,6 +21,7 @@ SKIP_GENERATION = False
 TRUST_REMOTE_CODE = True
 HARDWARE_PROFILING = True
 PROFILING_RUNS = 20
+GEN_REPEATS = 50        # 生成阶段每步重复次数（增大可降噪）
 ONNX_PATH = "../Models/ONNXs/Kokoro-82M.onnx"
 HARDWARE = {"peak_flops": 1979e12, "memory_bw": 3350e9}
 ENERGY_COUNTER = True  # 用 nvml 硬件能量计数器替代功率采样积分
@@ -440,8 +441,7 @@ def run_pytorch_mode():
             stopping_criteria=StoppingCriteriaList(),
         )
 
-        # 逐位置生成 + 测量：每个位置重复 PROFILING_RUNS 次 forward（KV cache 不变态）
-        # 确保 nvml 计数器窗口足够长
+        # 逐位置生成 + 测量：每个位置重复 GEN_REPEATS 次 forward（KV cache 不变态）
         input_ids = prompt_ids.clone()
         model_kwargs_gen = {"use_cache": True}
         if attention_mask is not None:
@@ -451,10 +451,9 @@ def run_pytorch_mode():
 
         with torch.no_grad():
             for step in range(MAX_NEW_TOKENS):
-                # PROFILING_RUNS 次重复（维持相同 cache 状态）
                 e_before = read_energy_j()
                 t_before = time.time()
-                for _ in range(PROFILING_RUNS):
+                for _ in range(GEN_REPEATS):
                     model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
                     outputs = model(**model_inputs, return_dict=True)
                     torch.cuda.synchronize()
@@ -463,7 +462,7 @@ def run_pytorch_mode():
                 dt = time.time() - t_before
 
                 raw_per_forward = (e_after - e_before) - P_bl * dt
-                e_step = max(raw_per_forward / PROFILING_RUNS, 0.0)
+                e_step = max(raw_per_forward / GEN_REPEATS, 0.0)
 
                 # 真正一次 forward 更新状态 + 选 token
                 model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
@@ -478,7 +477,7 @@ def run_pytorch_mode():
                 input_ids = torch.cat([input_ids, next_token], dim=-1)
 
                 generated_ids.append(next_token[0, 0].item())
-                token_data.append((step, e_step, dt / PROFILING_RUNS))
+                token_data.append((step, e_step, dt / GEN_REPEATS))
 
                 if stopping_criteria(input_ids, None):
                     break
@@ -493,7 +492,7 @@ def run_pytorch_mode():
             print("    (no output - model may need different prompts)")
 
         # 逐 token 能耗输出
-        print(f"\n  Per-token energy (P_bl={P_bl:.1f}W, each averaged over {PROFILING_RUNS} forwards):")
+        print(f"\n  Per-token energy (P_bl={P_bl:.1f}W, each averaged over {GEN_REPEATS} forwards):")
         print(f"  {'Token':>6s}  {'Energy(J)':>10s}  {'dt(s)':>8s}  {'Growth(%)':>10s}")
         print(f"  {'-' * 40}")
         prev = None
@@ -505,7 +504,7 @@ def run_pytorch_mode():
 
         energy_path = os.path.join(output_dir, "per_token_energy.txt")
         with open(energy_path, "w") as f:
-            f.write(f"# P_bl={P_bl:.1f}W  total_tokens={gen_len}  forwards_per_step={PROFILING_RUNS}\n")
+            f.write(f"# P_bl={P_bl:.1f}W  total_tokens={gen_len}  forwards_per_step={GEN_REPEATS}\n")
             f.write(f"# Token  Energy(J)  dt(s)  Growth(%)\n")
             prev = None
             for pos, e, dt in token_data:
@@ -636,6 +635,8 @@ if __name__ == "__main__":
                         help="禁用硬件 profiling")
     parser.add_argument("--runs", type=int, default=None,
                         help="profiling 重复次数")
+    parser.add_argument("--gen-repeats", type=int, default=None,
+                        help="生成阶段每步重复次数（默认 50）")
     _a = parser.parse_args()
 
     if _a.mode:
@@ -652,6 +653,8 @@ if __name__ == "__main__":
         HARDWARE_PROFILING = False
     if _a.runs is not None:
         PROFILING_RUNS = _a.runs
+    if _a.gen_repeats is not None:
+        GEN_REPEATS = _a.gen_repeats
 
     print("=" * 60)
     print("  LLM Graph Parser")
