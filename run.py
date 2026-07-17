@@ -403,141 +403,22 @@ def run_pytorch_mode():
         write_timestamp("gen_start", ts_path)
         write_energy("gen_start", ts_path)
         print(f"  [Phase 3/3] Generating (max {MAX_NEW_TOKENS})...")
-
-        # 从 idle_before 计算基准功率（与 power_analyze.py 一致）
-        P_bl = 80.0
-        with open(ts_path) as f:
-            ib_start_e = ib_end_e = None
-            for line in f:
-                if "idle_before_start_energy_j" in line:
-                    ib_start_e = float(line.strip().split()[1])
-                elif "idle_before_end_energy_j" in line:
-                    ib_end_e = float(line.strip().split()[1])
-            if ib_start_e is not None and ib_end_e is not None:
-                P_bl = (ib_end_e - ib_start_e) / 2.0
-
-        from transformers.generation import LogitsProcessorList, StoppingCriteriaList
-        import copy
-
-        # 和 generate() 内部一样：深拷贝 + 预处理 config
-        gen_config = copy.deepcopy(model.generation_config)
-        # generate() 的 _prepare_generation_config 会设这些 tensor 属性
-        if hasattr(gen_config, "eos_token_id") and gen_config.eos_token_id is not None:
-            eos_ids = gen_config.eos_token_id if isinstance(gen_config.eos_token_id, list) else [gen_config.eos_token_id]
-            gen_config._eos_token_tensor = torch.tensor(eos_ids, dtype=torch.long)
-        if hasattr(gen_config, "pad_token_id") and gen_config.pad_token_id is not None:
-            gen_config._pad_token_tensor = torch.tensor(gen_config.pad_token_id, dtype=torch.long)
-
-        logits_processor = model._get_logits_processor(
-            generation_config=gen_config,
-            input_ids_seq_length=prompt_ids.shape[1],
-            encoder_input_ids=prompt_ids,
-            prefix_allowed_tokens_fn=None,
-            logits_processor=LogitsProcessorList(),
-        )
-        stopping_criteria = model._get_stopping_criteria(
-            generation_config=gen_config,
-            stopping_criteria=StoppingCriteriaList(),
-        )
-
-        # 每步用 CUDA event 测 GPU 时间，总动态能耗按 GPU 时间比例分配
-        # 避免 nvml 计数器短窗口噪声
-        t_gen_start = time.time()
-        input_ids = prompt_ids.clone()
-        model_kwargs_gen = {"use_cache": True}
-        if attention_mask is not None:
-            model_kwargs_gen["attention_mask"] = attention_mask.clone()
-        generated_ids = []
-        per_step_gpu_us = []
-
         with torch.no_grad():
-            for step in range(MAX_NEW_TOKENS):
-                ev_start = torch.cuda.Event(enable_timing=True)
-                ev_end = torch.cuda.Event(enable_timing=True)
-
-                ev_start.record()
-                for _ in range(PROFILING_RUNS):
-                    model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
-                    outputs = model(**model_inputs, return_dict=True)
-                    torch.cuda.synchronize()
-                    del outputs
-                # 真正一次 forward 更新状态 + 选 token
-                model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
-                outputs = model(**model_inputs, return_dict=True)
-                model_kwargs_gen = model._update_model_kwargs_for_generation(
-                    outputs, model_kwargs_gen,
-                    is_encoder_decoder=model.config.is_encoder_decoder,
-                )
-                logits = outputs.logits[:, -1, :].float()
-                scores = logits_processor(input_ids, logits)
-                next_token = torch.argmax(scores, dim=-1, keepdim=True)
-                input_ids = torch.cat([input_ids, next_token], dim=-1)
-                ev_end.record()
-                torch.cuda.synchronize()
-
-                generated_ids.append(next_token[0, 0].item())
-                step_gpu_us = ev_start.elapsed_time(ev_end) * 1000  # ms → μs
-                per_step_gpu_us.append(step_gpu_us)
-
-                time.sleep(2.0)
-
-                if stopping_criteria(input_ids, None):
-                    break
-                del outputs
-
-        gen_len = len(generated_ids)
-
-        # 总动态能耗 = gen_start 到 gen_end 的 nvml 差分 - P_bl × 墙钟
-        t_gen_end = time.time()
-        write_energy("gen_end", ts_path)
-        write_timestamp("gen_end", ts_path)
-        with open(ts_path) as f:
-            gs = ge = None
-            for line in f:
-                if "gen_start_energy_j" in line:
-                    gs = float(line.strip().split()[1])
-                elif "gen_end_energy_j" in line:
-                    ge = float(line.strip().split()[1])
-        total_gen_j = (ge - gs) if gs and ge else 0.0
-        total_wall = t_gen_end - t_gen_start or 0.001
-        total_dynamic = max(total_gen_j - P_bl * total_wall, 0.0)
-
-        # 按 GPU 时间比例分配
-        total_gpu_us = sum(per_step_gpu_us)
-        token_data = []
-        for pos, gpu_us in enumerate(per_step_gpu_us):
-            e_step = total_dynamic * (gpu_us / total_gpu_us) if total_gpu_us > 0 else 0.0
-            token_data.append((pos, e_step, gpu_us / 1e6))
-
-        answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+            kw = dict(max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
+            if attention_mask is not None:
+                kw["attention_mask"] = attention_mask
+            for k, v in model.generation_config.to_dict().items():
+                if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
+                    kw[k] = v
+            out = model.generate(prompt_ids, **kw)
+        gen_len = out.shape[1] - seq_len
+        answer = tokenizer.decode(out[0, seq_len:], skip_special_tokens=True).strip()
         print(f"    generated: {gen_len} tokens")
         print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
         if gen_len == 0:
             print("    (no output - model may need different prompts)")
-
-        # 逐 token 能耗输出（nvml 总能耗 × GPU 时间比例分配）
-        print(f"\n  Per-token energy (P_bl={P_bl:.1f}W, total_dynamic={total_dynamic:.2f}J):")
-        print(f"  {'Token':>6s}  {'Energy(J)':>10s}  {'GPU(ms)':>8s}  {'Growth(%)':>10s}")
-        print(f"  {'-' * 40}")
-        prev = None
-        for pos, e, gpu_s in token_data:
-            g = (e / prev - 1) * 100 if prev else None
-            gs = f"{g:>+9.2f}" if g is not None else "      --"
-            print(f"  {pos+1:>6d}  {e:>8.4f}  {gpu_s*1000:>7.2f}  {gs:>10s}")
-            prev = e
-
-        energy_path = os.path.join(output_dir, "per_token_energy.txt")
-        with open(energy_path, "w") as f:
-            f.write(f"# P_bl={P_bl:.1f}W  total_dynamic={total_dynamic:.4f}J  tokens={gen_len}\n")
-            f.write(f"# Method: nvml total energy × per-step GPU time proportion\n")
-            f.write(f"# Token  Energy(J)  GPU(ms)  Growth(%)\n")
-            prev = None
-            for pos, e, gpu_s in token_data:
-                g = (e / prev - 1) * 100 if prev else None
-                gs = f"{g:+.2f}" if g is not None else "--"
-                f.write(f"{pos+1}  {e:.6f}  {gpu_s*1000:.3f}  {gs}\n")
-                prev = e
-        print(f"    -> saved to {energy_path}")
+        write_energy("gen_end", ts_path)
+        write_timestamp("gen_end", ts_path)
 
     # ---- Layer partitioner ----
     for g in (prefill_graph, decode_graph):
