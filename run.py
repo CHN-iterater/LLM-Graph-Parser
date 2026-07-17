@@ -517,6 +517,33 @@ def run_pytorch_mode():
         write_energy("gen_end", ts_path)
         write_timestamp("gen_end", ts_path)
 
+        # ---- Per-token operator mapping ----
+        if gen_len > 0 and decode_graph is not None:
+            op_path = os.path.join(output_dir, "per_token_operators.txt")
+            with open(op_path, "w", encoding="utf-8") as f:
+                f.write(f"# Per-token operator mapping  prompt_len={seq_len}  gen_tokens={gen_len}\n")
+                for pos in range(gen_len):
+                    total_e = token_data[pos][1] if pos < len(token_data) else 0.0
+                    f.write(f"\n=== Token {pos+1} (total={total_e:.4f}J) ===\n")
+                    f.write(f"{'Operator':25s}  {'Input Shapes':50s}  {'Output Shapes':50s}\n")
+                    f.write("-" * 130 + "\n")
+                    for node in decode_graph.nodes:
+                        ins = node.get("input_tensors", [])
+                        outs = node.get("output_tensors", [])
+                        in_shapes = [list(t["shape"]) for t in ins]
+                        out_shapes = [list(t["shape"]) for t in outs]
+                        # Adjust attention sequence dim: seq_len → prompt_len + pos + 1
+                        if node["op_type"] in ("SOFTMAX", "BMM"):
+                            for shapes in (in_shapes, out_shapes):
+                                for s in shapes:
+                                    for i in [-1]:
+                                        if len(s) > 1 and isinstance(s[i], int) and s[i] > 0:
+                                            s[i] = seq_len + pos + 1
+                        ins_str = "; ".join(str(s) for s in in_shapes)
+                        outs_str = "; ".join(str(s) for s in out_shapes)
+                        f.write(f"{node['op_type']:25s}  {ins_str:50s}  {outs_str:50s}\n")
+            print(f"    -> saved to {op_path}")
+
     # ---- Layer partitioner ----
     for g in (prefill_graph, decode_graph):
         try:
