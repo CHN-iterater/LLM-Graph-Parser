@@ -528,12 +528,12 @@ def run_pytorch_mode():
                     f.write(f"{'Operator':25s}  {'Input Shapes':50s}  {'Output Shapes':50s}\n")
                     f.write("-" * 130 + "\n")
                     for node in decode_graph.nodes:
-                        ins = node.get("input_tensors", [])
-                        outs = node.get("output_tensors", [])
-                        in_shapes = [list(t["shape"]) for t in ins]
-                        out_shapes = [list(t["shape"]) for t in outs]
+                        ins = node.input_tensors
+                        outs = node.output_tensors
+                        in_shapes = [list(t.shape) for t in ins]
+                        out_shapes = [list(t.shape) for t in outs]
                         # Adjust attention sequence dim: seq_len → prompt_len + pos + 1
-                        if node["op_type"] in ("SOFTMAX", "BMM"):
+                        if node.op_type in ("SOFTMAX", "BMM"):
                             for shapes in (in_shapes, out_shapes):
                                 for s in shapes:
                                     for i in [-1]:
@@ -541,7 +541,7 @@ def run_pytorch_mode():
                                             s[i] = seq_len + pos + 1
                         ins_str = "; ".join(str(s) for s in in_shapes)
                         outs_str = "; ".join(str(s) for s in out_shapes)
-                        f.write(f"{node['op_type']:25s}  {ins_str:50s}  {outs_str:50s}\n")
+                        f.write(f"{node.op_type:25s}  {ins_str:50s}  {outs_str:50s}\n")
             print(f"    -> saved to {op_path}")
 
     # ---- Layer partitioner ----
