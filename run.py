@@ -1,5 +1,5 @@
 """LLM Graph Parser — 完整推理流程阶段分析。"""
-import os
+import os, logging
 from datetime import datetime
 from pathlib import Path
 
@@ -418,7 +418,6 @@ def run_pytorch_mode():
 
         from transformers.generation import LogitsProcessorList, StoppingCriteriaList
 
-        # 构造和 model.generate() 相同的 logits 处理器
         logits_processor = model._get_logits_processor(
             generation_config=model.generation_config,
             input_ids_seq_length=prompt_ids.shape[1],
@@ -426,10 +425,21 @@ def run_pytorch_mode():
             prefix_allowed_tokens_fn=None,
             logits_processor=LogitsProcessorList(),
         )
-        stopping_criteria = model._get_stopping_criteria(
-            generation_config=model.generation_config,
-            stopping_criteria=StoppingCriteriaList(),
-        )
+
+        # 用 try 兼容 _get_stopping_criteria 在不同 transformers 版本中的差异
+        try:
+            stopping_criteria = model._get_stopping_criteria(
+                generation_config=model.generation_config,
+                stopping_criteria=StoppingCriteriaList(),
+            )
+        except (AttributeError, TypeError):
+            eos = model.generation_config.eos_token_id or getattr(tokenizer, "eos_token_id", None) or []
+            if not isinstance(eos, list):
+                eos = [eos]
+            class _EosStop:
+                def __call__(self, ids, *a, **kw):
+                    return ids[:, -1].item() in eos
+            stopping_criteria = _EosStop()
 
         input_ids = prompt_ids.clone()
         past_key_values = None
