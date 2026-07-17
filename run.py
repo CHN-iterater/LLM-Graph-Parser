@@ -400,6 +400,10 @@ def run_pytorch_mode():
         gen_len, answer = 0, ""
         print(f"  [Phase 3/3] Skipped (SKIP_GENERATION=True)")
     else:
+        write_timestamp("gen_start", ts_path)
+        write_energy("gen_start", ts_path)
+        print(f"  [Phase 3/3] Generating (max {MAX_NEW_TOKENS})...")
+
         # 从 idle_before 计算基准功率（与 power_analyze.py 一致）
         P_bl = 80.0
         with open(ts_path) as f:
@@ -412,90 +416,131 @@ def run_pytorch_mode():
             if ib_start_e is not None and ib_end_e is not None:
                 P_bl = (ib_end_e - ib_start_e) / 2.0
 
-        # Step 3a: 先用 generate() 跑一次拿到 token 序列
-        write_timestamp("gen_start", ts_path)
-        write_energy("gen_start", ts_path)
-        print(f"  [Phase 3/3] Generating (max {MAX_NEW_TOKENS})...")
-        with torch.no_grad():
-            kw = dict(max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
+        from transformers.generation import LogitsProcessorList, StoppingCriteriaList
+        import copy
+
+        # 和 generate() 内部一样：深拷贝 + 预处理 config
+        gen_config = copy.deepcopy(model.generation_config)
+        # generate() 的 _prepare_generation_config 会设这些 tensor 属性
+        if hasattr(gen_config, "eos_token_id") and gen_config.eos_token_id is not None:
+            eos_ids = gen_config.eos_token_id if isinstance(gen_config.eos_token_id, list) else [gen_config.eos_token_id]
+            gen_config._eos_token_tensor = torch.tensor(eos_ids, dtype=torch.long)
+        if hasattr(gen_config, "pad_token_id") and gen_config.pad_token_id is not None:
+            gen_config._pad_token_tensor = torch.tensor(gen_config.pad_token_id, dtype=torch.long)
+
+        logits_processor = model._get_logits_processor(
+            generation_config=gen_config,
+            input_ids_seq_length=prompt_ids.shape[1],
+            encoder_input_ids=prompt_ids,
+            prefix_allowed_tokens_fn=None,
+            logits_processor=LogitsProcessorList(),
+        )
+        stopping_criteria = model._get_stopping_criteria(
+            generation_config=gen_config,
+            stopping_criteria=StoppingCriteriaList(),
+        )
+
+        # 多轮生成：第一轮 warmup，后续 PROFILING_RUNS-1 轮测量取平均
+        # 避免 nvml 计数器刷新频率导致的单步能量为 0
+        all_raw = []   # [step][run] = energy_delta_J
+        all_dt = []    # [step][run] = time_s
+        all_tokens = None
+
+        for run in range(PROFILING_RUNS):
+            input_ids = prompt_ids.clone()
+            model_kwargs_gen = {"use_cache": True}
             if attention_mask is not None:
-                kw["attention_mask"] = attention_mask
-            for k, v in model.generation_config.to_dict().items():
-                if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
-                    kw[k] = v
-            out = model.generate(prompt_ids, **kw)
-        gen_tokens = out[0, seq_len:]
-        gen_len = len(gen_tokens)
-        answer = tokenizer.decode(gen_tokens, skip_special_tokens=True).strip()
+                model_kwargs_gen["attention_mask"] = attention_mask.clone()
+
+            run_raw = []
+            run_dt = []
+            run_tokens = []
+
+            with torch.no_grad():
+                for step in range(MAX_NEW_TOKENS):
+                    e_before = read_energy_j()
+                    t_before = time.time()
+
+                    model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
+                    outputs = model(**model_inputs, return_dict=True)
+                    model_kwargs_gen = model._update_model_kwargs_for_generation(
+                        outputs, model_kwargs_gen,
+                        is_encoder_decoder=model.config.is_encoder_decoder,
+                    )
+
+                    logits = outputs.logits[:, -1, :].float()
+                    scores = logits_processor(input_ids, logits)
+
+                    if model.generation_config.do_sample:
+                        probs = torch.nn.functional.softmax(scores, dim=-1)
+                        next_token = torch.multinomial(probs, num_samples=1)
+                    else:
+                        next_token = torch.argmax(scores, dim=-1, keepdim=True)
+
+                    input_ids = torch.cat([input_ids, next_token], dim=-1)
+
+                    torch.cuda.synchronize()
+                    e_after = read_energy_j()
+                    dt = time.time() - t_before
+
+                    run_raw.append(e_after - e_before)
+                    run_dt.append(dt)
+                    run_tokens.append(next_token[0, 0].item())
+
+                    if stopping_criteria(input_ids, None):
+                        break
+                    del outputs
+
+            gen_len = len(run_tokens)
+
+            if run == 0:
+                # warmup：记录 token 序列，丢弃能量数据
+                all_tokens = run_tokens
+                print(f"    warmup run {run+1}/{PROFILING_RUNS} done ({gen_len} tokens)")
+                continue
+
+            # 测量轮：按位置累积
+            for step in range(gen_len):
+                if len(all_raw) <= step:
+                    all_raw.append([])
+                    all_dt.append([])
+                all_raw[step].append(run_raw[step])
+                all_dt[step].append(run_dt[step])
+
+            print(f"    run {run+1}/{PROFILING_RUNS} done ({gen_len} tokens)")
+
+        generated_ids = all_tokens
+
+        # 平均后扣除基准
+        token_data = []
+        for step in range(gen_len):
+            avg_raw = sum(all_raw[step]) / len(all_raw[step])
+            avg_dt = sum(all_dt[step]) / len(all_dt[step])
+            e_step = max(avg_raw - P_bl * avg_dt, 0.0)
+            token_data.append((step, e_step, avg_dt))
+
+        answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
         print(f"    generated: {gen_len} tokens")
         print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
         if gen_len == 0:
             print("    (no output - model may need different prompts)")
-        write_energy("gen_end", ts_path)
-        write_timestamp("gen_end", ts_path)
 
-        # Step 3b: 用已知 token 重跑 PROFILING_RUNS 次，测 per-token 能耗
-        print(f"  Measuring per-token energy ({PROFILING_RUNS} runs, +1 warmup)...")
-        raw_energies = [[] for _ in range(gen_len)]
-        dts = [[] for _ in range(gen_len)]
-
-        nv_device = prompt_ids.device
-        for run in range(PROFILING_RUNS + 1):  # 多一轮 warmup
-            inp = prompt_ids.clone()
-            mkw = {"use_cache": True}
-            if attention_mask is not None:
-                mkw["attention_mask"] = attention_mask.clone()
-
-            with torch.no_grad():
-                for pos in range(gen_len):
-                    if run > 0:  # warmup 不记录
-                        e_before = read_energy_j()
-                    t_before = time.time()
-
-                    model_inputs = model.prepare_inputs_for_generation(inp, **mkw)
-                    outputs = model(**model_inputs, return_dict=True)
-                    mkw = model._update_model_kwargs_for_generation(
-                        outputs, mkw,
-                        is_encoder_decoder=model.config.is_encoder_decoder,
-                    )
-
-                    torch.cuda.synchronize()
-                    if run > 0:  # warmup 不记录
-                        e_after = read_energy_j()
-                        raw_energies[pos].append(e_after - e_before)
-                        dts[pos].append(time.time() - t_before)
-
-                    next_token = torch.tensor([[gen_tokens[pos]]], device=nv_device)
-                    inp = torch.cat([inp, next_token], dim=-1)
-                    del outputs
-
-        # 平均后扣基准
-        avg_raw = [sum(es) / len(es) for es in raw_energies]
-        avg_dt = [sum(ds) / len(ds) for ds in dts]
-        token_energies = [max(r - P_bl * d, 0.0) for r, d in zip(avg_raw, avg_dt)]
-
-        # 输出
-        print(f"\n  Per-token energy (P_bl={P_bl:.1f}W, avg over {PROFILING_RUNS} runs):")
-        print(f"  {'Token':>6s}  {'Energy(J)':>10s}  {'dt(ms)':>8s}  {'Growth(%)':>10s}")
+        # 逐 token 能耗输出
+        print(f"\n  Per-token energy (P_bl={P_bl:.1f}W, averaged over {PROFILING_RUNS-1} runs):")
+        print(f"  {'Token':>6s}  {'Energy(J)':>10s}  {'dt(s)':>8s}  {'Growth(%)':>10s}")
         print(f"  {'-' * 40}")
         prev = None
-        for pos, e, d in zip(range(gen_len), token_energies, avg_dt):
+        for pos, e, dt in token_data:
             g = (e / prev - 1) * 100 if prev else None
             gs = f"{g:>+9.2f}" if g is not None else "      --"
-            print(f"  {pos+1:>6d}  {e:>8.4f}  {d*1000:>6.2f}  {gs:>10s}")
+            print(f"  {pos+1:>6d}  {e:>8.4f}  {dt:>6.4f}  {gs:>10s}")
             prev = e
 
         energy_path = os.path.join(output_dir, "per_token_energy.txt")
         with open(energy_path, "w") as f:
-            f.write(f"# P_bl={P_bl:.1f}W  total_tokens={gen_len}  runs={PROFILING_RUNS}\n")
-            f.write(f"# Token  Energy(J)  dt(ms)  Growth(%)\n")
+            f.write(f"# P_bl={P_bl:.1f}W  total_tokens={gen_len}  runs={PROFILING_RUNS-1}\n")
+            f.write(f"# Token  Energy(J)  dt(s)  Growth(%)\n")
             prev = None
-            for pos, e, d in zip(range(gen_len), token_energies, avg_dt):
-                g = (e / prev - 1) * 100 if prev else None
-                gs = f"{g:+.2f}" if g is not None else "--"
-                f.write(f"{pos+1}  {e:.6f}  {d*1000:.2f}  {gs}\n")
-                prev = e
-        print(f"    -> saved to {energy_path}")
             for pos, e, dt in token_data:
                 g = (e / prev - 1) * 100 if prev else None
                 gs = f"{g:+.2f}" if g is not None else "--"
