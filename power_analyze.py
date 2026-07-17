@@ -91,15 +91,25 @@ def main():
     runs = max(args.runs, 1)
     gen_len = max(args.gen_len, 1)
 
-    idle_before = idle_after = 0.0
-    if "idle_before_end_energy_j" in ts:
-        be = ts["idle_before_end_energy_j"] - ts["idle_before_start_energy_j"]
-        bs = ts["idle_before_end"] - ts["idle_before_start"]
-        idle_before = be / max(bs, 0.1)
+    idle_cuda = idle_after = 0.0
+    if "idle_cuda_end_energy_j" in ts:
+        e = ts["idle_cuda_end_energy_j"] - ts["idle_cuda_start_energy_j"]
+        t = ts["idle_cuda_end"] - ts["idle_cuda_start"]
+        if t > 0.1:
+            idle_cuda = e / t
     if "idle_after_end_energy_j" in ts:
-        ae = ts["idle_after_end_energy_j"] - ts["idle_after_start_energy_j"]
-        a_s = ts["idle_after_end"] - ts["idle_after_start"]
-        idle_after = ae / max(a_s, 0.1)
+        e = ts["idle_after_end_energy_j"] - ts["idle_after_start_energy_j"]
+        t = ts["idle_after_end"] - ts["idle_after_start"]
+        if t > 0.1:
+            idle_after = e / t
+
+    # 推理前后空闲功率均值作为基准，补偿温漂
+    if idle_cuda > 0 and idle_after > 0:
+        P_bl = (idle_cuda + idle_after) / 2
+    elif idle_cuda > 0:
+        P_bl = idle_cuda
+    else:
+        P_bl = 0.0
 
     phases = [("Prefill", "prefill_start", "prefill_end"), ("Decode", "decode_start", "decode_end")]
     results = []
@@ -108,16 +118,6 @@ def main():
             continue
 
         wall_s = ts[e] - ts[s]
-
-        # 基线 = 阶段起止时刻 GPU 0 瞬时功率的均值
-        # 基线：窗口内全部功率样本的均值
-        mask = (times >= ts[s]) & (times <= ts[e])
-        if mask.any():
-            P_bl = float(powers[mask, 0].mean())
-        elif idle_before > 0:
-            P_bl = idle_before
-        else:
-            P_bl = 0.0
 
         energy_tag_s = f"{s}_energy_j"
         energy_tag_e = f"{e}_energy_j"
@@ -177,8 +177,9 @@ def main():
         label = name
         print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
 
-    if idle_before > 0:
-        print(f"\n  [参考] idle_before={idle_before:.1f}W  idle_after={idle_after:.1f}W")
+    if idle_cuda > 0 or idle_after > 0:
+        avg = (idle_cuda + idle_after) / 2 if idle_cuda > 0 and idle_after > 0 else (idle_cuda or idle_after)
+        print(f"\n  [参考] idle_cuda={idle_cuda:.1f}W  idle_after={idle_after:.1f}W  基准用={avg:.1f}W")
 
     if len(results) >= 2:
         td = sum(r[1] for r in results)

@@ -60,6 +60,7 @@ def _linear_t(a, b, *args):
     return a * prod(args) + b
 
 
+# -------------------------------------------------------------------
 # 算子公式注册表
 # key = (t_func_args, p_func, energy_func)
 #   t_func_args: ("N*M", a, b) 或 ("N*M*K", a, b) 或 ("N,M", aN, bM, cMN, d)
