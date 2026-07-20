@@ -361,84 +361,71 @@ def run_pytorch_mode():
         pf_kwargs = {}
         if attention_mask is not None:
             pf_kwargs["attention_mask"] = attention_mask
-        _ = profiler.time_forward(model, prompt_ids, label="prefill", num_runs=PROFILING_RUNS, **pf_kwargs)
-    if HARDWARE_PROFILING and profiler.available:
-        total_gpu_us = profiler._prefill_total_us * PROFILING_RUNS
-        print(f"    time={profiler._prefill_total_us/1000:.2f}ms (per run), total GPU time={total_gpu_us/1000:.2f}ms")
+        _start_ev = torch.cuda.Event(enable_timing=True)
+        _end_ev = torch.cuda.Event(enable_timing=True)
+        _start_ev.record()
+        _pf_prof = None
+        with torch.no_grad():
+            for _i in range(PROFILING_RUNS):
+                if _i == 0:
+                    try:
+                        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as _p:
+                            model(prompt_ids, **pf_kwargs)
+                            torch.cuda.synchronize()
+                        _pf_prof = _p
+                    except Exception:
+                        model(prompt_ids, **pf_kwargs)
+                        torch.cuda.synchronize()
+                else:
+                    model(prompt_ids, **pf_kwargs)
+                    torch.cuda.synchronize()
+        _end_ev.record()
+        torch.cuda.synchronize()
+        total_gpu_us = _start_ev.elapsed_time(_end_ev) * 1000
+        per_run_us = total_gpu_us // PROFILING_RUNS
+        profiler._prefill_total_us = per_run_us
+        print(f"    time={per_run_us/1000:.2f}ms (per run), total GPU time={total_gpu_us/1000:.2f}ms")
         with open(ts_path, "a") as tf:
-            tf.write(f"prefill_gpu_us {int(total_gpu_us)}\n")
+            tf.write(f"prefill_gpu_us {int(total_gpu_us)}
+")
     write_energy("prefill_end", ts_path)
     write_timestamp("prefill_end", ts_path)
 
-    # ---- Kernel classification profiling (after measurement, non-fatal) ----
-    if HARDWARE_PROFILING and profiler.available:
-        try:
-            with torch.no_grad():
-                _wkw = {}
-                if attention_mask is not None:
-                    _wkw["attention_mask"] = attention_mask
-                model(prompt_ids, **_wkw)
-                torch.cuda.synchronize()
-            with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU]
-            ) as _prof:
-                with torch.no_grad():
-                    _kw = {}
-                    if attention_mask is not None:
-                        _kw["attention_mask"] = attention_mask
-                    model(prompt_ids, **_kw)
-                    torch.cuda.synchronize()
-            _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
-            for _ev in _prof.key_averages():
-                _n = _ev.key.lower()
-                _d = 0
-                for _attr in ("cpu_time_total", "self_cpu_time_total", "cpu_time"):
-                    _v = getattr(_ev, _attr, None)
-                    if _v is not None and isinstance(_v, (int, float)) and _v > 0:
-                        _d = _v
-                        break
-                if not _d:
-                    continue
-                if any(k in _n for k in ("nccl","allreduce","allgather","broadcast","reduce_scatter")):
-                    _t["communication"] += _d
-                elif any(k in _n for k in (
-                    "memcpy","memset",
-                    "aten::copy_","aten::to","aten::_to_copy",
-                    "aten::cat","aten::stack",
-                    "aten::transpose","aten::t","aten::permute",
-                    "aten::reshape","aten::view",
-                    "aten::expand","aten::expand_as",
-                    "aten::slice","aten::narrow",
-                    "aten::split","aten::chunk",
-                    "aten::unsqueeze","aten::squeeze",
-                    "aten::pad","aten::constant_pad",
-                    "aten::clone",
-                )):
-                    _t["data_movement"] += _d
-                elif any(k in _n for k in (
-                    "cublas","cutlass","gemm",
-                    "aten::mm","aten::addmm","aten::bmm","aten::matmul","aten::linear",
-                    "aten::_convolution","aten::conv",
-                    "aten::softmax","aten::_softmax",
-                    "aten::layer_norm","aten::native_layer_norm","aten::rms_norm","aten::batch_norm",
-                    "aten::gelu","aten::silu","aten::relu","aten::tanh","aten::sigmoid",
-                    "flash","attention",
-                )):
-                    _t["compute_bound"] += _d
-                else:
-                    _t["memory_bound"] += _d
-            _s = sum(_t.values()) or 1
-            for _k in _t:
-                _t[_k] /= _s
-            with open(ts_path, "a") as _tf:
-                _tf.write(f"prefill_kernel_ratio_compute {_t['compute_bound']:.4f}\n")
-                _tf.write(f"prefill_kernel_ratio_memory {_t['memory_bound']:.4f}\n")
-                _tf.write(f"prefill_kernel_ratio_data_movement {_t['data_movement']:.4f}\n")
-                _tf.write(f"prefill_kernel_ratio_communication {_t['communication']:.4f}\n")
-            print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
-            _write_kernel_report(_prof, output_dir, "prefill")
-        except Exception:
-            print("    kernel profile: skipped")
+
+    if _pf_prof is not None:
+        _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
+        for _ev in _pf_prof.key_averages():
+            _n = _ev.key.lower()
+            _d = 0
+            for _a in ("cpu_time_total", "self_cpu_time_total", "cpu_time"):
+                _v = getattr(_ev, _a, None)
+                if _v is not None and isinstance(_v, (int, float)) and _v > 0:
+                    _d = _v
+                    break
+            if not _d:
+                continue
+            if any(k in _n for k in ("nccl","allreduce","allgather","broadcast","reduce_scatter")):
+                _t["communication"] += _d
+            elif any(k in _n for k in ("memcpy","memset","aten::copy_","aten::to","aten::cat","aten::transpose","aten::permute","aten::reshape","aten::view","aten::expand","aten::slice","aten::split","aten::clone")):
+                _t["data_movement"] += _d
+            elif any(k in _n for k in ("cublas","cutlass","gemm","aten::mm","aten::addmm","aten::bmm","aten::matmul","aten::linear","aten::_convolution","aten::conv","aten::softmax","aten::layer_norm","aten::native_layer_norm","aten::rms_norm","aten::gelu","aten::silu","aten::relu","aten::tanh","aten::sigmoid","flash","attention")):
+                _t["compute_bound"] += _d
+            else:
+                _t["memory_bound"] += _d
+        _s = sum(_t.values()) or 1
+        for _k in _t:
+            _t[_k] /= _s
+        with open(ts_path, "a") as _tf:
+            _tf.write(f"prefill_kernel_ratio_compute {_t['compute_bound']:.4f}
+")
+            _tf.write(f"prefill_kernel_ratio_memory {_t['memory_bound']:.4f}
+")
+            _tf.write(f"prefill_kernel_ratio_data_movement {_t['data_movement']:.4f}
+")
+            _tf.write(f"prefill_kernel_ratio_communication {_t['communication']:.4f}
+")
+        print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
+        _write_kernel_report(_pf_prof, output_dir, "prefill")
 
     # 冷却 10s，让 GPU 温度在 decode 测量前回落到接近 idle
 
@@ -477,75 +464,6 @@ def run_pytorch_mode():
     write_timestamp("decode_end", ts_path)
     print(f"  [Phase 2/3] Decode ({PROFILING_RUNS} token forwards)")
 
-    # ---- Decode kernel classification (after measurement, non-fatal) ----
-    if HARDWARE_PROFILING and profiler.available:
-        try:
-            with torch.no_grad():
-                _wkw = {}
-                if attention_mask is not None:
-                    _wkw["attention_mask"] = attention_mask[:, -1:]
-                model(decode_token, **_wkw)
-                torch.cuda.synchronize()
-            with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU]
-            ) as _prof:
-                with torch.no_grad():
-                    _kw = {}
-                    if attention_mask is not None:
-                        _kw["attention_mask"] = attention_mask[:, -1:]
-                    model(decode_token, **_kw)
-                    torch.cuda.synchronize()
-            _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
-            for _ev in _prof.key_averages():
-                _n = _ev.key.lower()
-                _d = 0
-                for _attr in ("cpu_time_total", "self_cpu_time_total", "cpu_time"):
-                    _v = getattr(_ev, _attr, None)
-                    if _v is not None and isinstance(_v, (int, float)) and _v > 0:
-                        _d = _v
-                        break
-                if not _d:
-                    continue
-                if any(k in _n for k in ("nccl","allreduce","allgather","broadcast","reduce_scatter")):
-                    _t["communication"] += _d
-                elif any(k in _n for k in (
-                    "memcpy","memset",
-                    "aten::copy_","aten::to","aten::_to_copy",
-                    "aten::cat","aten::stack",
-                    "aten::transpose","aten::t","aten::permute",
-                    "aten::reshape","aten::view",
-                    "aten::expand","aten::expand_as",
-                    "aten::slice","aten::narrow",
-                    "aten::split","aten::chunk",
-                    "aten::unsqueeze","aten::squeeze",
-                    "aten::pad","aten::constant_pad",
-                    "aten::clone",
-                )):
-                    _t["data_movement"] += _d
-                elif any(k in _n for k in (
-                    "cublas","cutlass","gemm",
-                    "aten::mm","aten::addmm","aten::bmm","aten::matmul","aten::linear",
-                    "aten::_convolution","aten::conv",
-                    "aten::softmax","aten::_softmax",
-                    "aten::layer_norm","aten::native_layer_norm","aten::rms_norm","aten::batch_norm",
-                    "aten::gelu","aten::silu","aten::relu","aten::tanh","aten::sigmoid",
-                    "flash","attention",
-                )):
-                    _t["compute_bound"] += _d
-                else:
-                    _t["memory_bound"] += _d
-            _s = sum(_t.values()) or 1
-            for _k in _t:
-                _t[_k] /= _s
-            with open(ts_path, "a") as _tf:
-                _tf.write(f"decode_kernel_ratio_compute {_t['compute_bound']:.4f}\n")
-                _tf.write(f"decode_kernel_ratio_memory {_t['memory_bound']:.4f}\n")
-                _tf.write(f"decode_kernel_ratio_data_movement {_t['data_movement']:.4f}\n")
-                _tf.write(f"decode_kernel_ratio_communication {_t['communication']:.4f}\n")
-            print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
-            _write_kernel_report(_prof, output_dir, "decode")
-        except Exception:
-            print("    kernel profile: skipped")
 
     # ONNX 导出
     prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
