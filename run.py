@@ -322,7 +322,7 @@ def run_pytorch_mode():
         for _ev in _prof.key_averages():
             _n = _ev.key.lower()
             _d = 0
-            for _attr in ("device_time_total", "cuda_time_total", "self_device_time_total", "self_cuda_time_total", "device_time", "cuda_time"):
+            for _attr in ("device_time_total", "self_device_time_total", "device_time", "cuda_time_total"):
                 _v = getattr(_ev, _attr, None)
                 if _v is not None and isinstance(_v, (int, float)) and _v > 0:
                     _d = _v
@@ -430,7 +430,7 @@ def run_pytorch_mode():
         for _ev in _prof.key_averages():
             _n = _ev.key.lower()
             _d = 0
-            for _attr in ("device_time_total", "cuda_time_total", "self_device_time_total", "self_cuda_time_total", "device_time", "cuda_time"):
+            for _attr in ("device_time_total", "self_device_time_total", "device_time", "cuda_time_total"):
                 _v = getattr(_ev, _attr, None)
                 if _v is not None and isinstance(_v, (int, float)) and _v > 0:
                     _d = _v
