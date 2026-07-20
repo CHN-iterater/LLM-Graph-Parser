@@ -603,7 +603,7 @@ def run_pytorch_mode():
                 )
                 logits = outputs.logits[:, -1, :].float()
                 scores = logits_processor(input_ids, logits)
-                next_token = torch.argmax(scores, dim=-1, keepdim=True)
+                next_token = torch.argmax(scores[:, :model.config.vocab_size], dim=-1, keepdim=True)
                 input_ids = torch.cat([input_ids, next_token], dim=-1)
 
                 generated_ids.append(next_token[0, 0].item())
