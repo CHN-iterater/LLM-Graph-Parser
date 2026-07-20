@@ -228,7 +228,7 @@ def run_pytorch_mode():
     # 在 CUDA 初始化前测量 GPU 0 真实空闲功率
     write_timestamp("idle_before_start", ts_path)
     write_energy("idle_before_start", ts_path)
-    import time; time.sleep(2)
+    import time; time.sleep(10)
     write_timestamp("idle_before_end", ts_path)
     write_energy("idle_before_end", ts_path)
 
