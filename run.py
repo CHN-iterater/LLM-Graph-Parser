@@ -197,45 +197,15 @@ def _summary_extra(graph, combined, decode_graph, gen_len, pf_ai, profiler=None)
         if gen_len > 0 and dc_t > 0:
             lines.append(f"    Throughput: {gen_len/(dc_t/1000):.1f} tokens/s")
 
-    # 15-type classification
+    # Operator distribution (raw ONNX op_types)
     counts = combined.get_operator_counts()
-    types: dict[int, int] = {}
-    aux: dict[str, int] = {}
-    for op, cnt in counts.items():
-        node = combined._nodes.get(list(combined._nodes.keys())[0]) if combined._nodes else None
-        # Find any node of this type to get its category
-        cat = "other"
-        for n in combined._nodes.values():
-            if n.op_type == op:
-                cat = n.category; break
-        tid, tname = classify_15(op, cat)
-        if tid > 0:
-            types.setdefault(tid, 0)
-            types[tid] += cnt
-        else:
-            aux[op] = cnt
-
     lines.append("")
-    lines.append(f"  {'ID':>4s}  {'Type':30s}  {'Count':>8s}  {'Energy Class':>18s}")
-    lines.append("  " + "-" * 66)
-    for tid in sorted(types):
-        tname = {1:"GEMM",2:"FlashAttention",3:"BMM",4:"Softmax",5:"LayerNorm",
-                 6:"RMSNorm",7:"Reduction",8:"GELU",9:"SiLU/Swish",10:"ReLU",
-                 11:"KV Cache",12:"KV Cache Write",13:"AllReduce",14:"AllGather",15:"Memcpy D2D"}.get(tid, f"Type-{tid}")
-        eclass = {1:"compute_bound",2:"compute_bound",3:"compute_bound",
-                  4:"memory_bound",5:"memory_bound",6:"memory_bound",7:"memory_bound",
-                  8:"activation",9:"activation",10:"activation",
-                  11:"data_movement",12:"data_movement",13:"communication",14:"communication",15:"data_movement"}.get(tid, "")
-        lines.append(f"  #{tid:2d}  {tname:30s}  {types[tid]:>8d}  {eclass:>18s}")
-
-    if aux:
-        lines.append("  " + "-" * 66)
-        lines.append(f"  {'--':>4s}  {'Auxiliary operators':30s}  {sum(aux.values()):>8d}")
-    total_main = sum(types.values())
-    total_aux = sum(aux.values())
-    lines.append(f"  {'--':>4s}  {'---':30s}  {'---':>8s}")
-    lines.append(f"  {'Main':>4s}  {'(types 1-15)':30s}  {total_main:>8d}")
-    lines.append(f"  {'Aux':>4s}  {'(assist ops)':30s}  {total_aux:>8d}")
+    lines.append(f"  {'Operator':25s}  {'Count':>8s}")
+    lines.append("  " + "-" * 35)
+    for op, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+        lines.append(f"  {op:25s}  {cnt:>8d}")
+    lines.append("  " + "-" * 35)
+    lines.append(f"  {'Total':25s}  {sum(counts.values()):>8d}")
 
     return lines
 
@@ -341,16 +311,20 @@ def run_pytorch_mode():
                 torch.cuda.synchronize()
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
         for _ev in _prof.events():
-            _n = _ev.name.lower()
-            _d = _ev.self_device_time_total if hasattr(_ev, "self_device_time_total") else (_ev.self_cuda_time_total if hasattr(_ev, "self_cuda_time_total") else 0)
-            if any(k in _n for k in ("nccl","allreduce","allgather")):
-                _t["communication"] += _d
-            elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
-                _t["data_movement"] += _d
-            elif any(k in _n for k in ("cublas","gemm","matmul","bmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
-                _t["compute_bound"] += _d
-            else:
-                _t["memory_bound"] += _d
+            _candidates = getattr(_ev, "kernels", None) or [_ev]
+            for _ce in _candidates:
+                _n = _ce.name.lower()
+                _d = getattr(_ce, "self_device_time_total", getattr(_ce, "self_cuda_time_total", getattr(_ce, "cuda_time", 0)))
+                if not _d:
+                    continue
+                if any(k in _n for k in ("nccl","allreduce","allgather")):
+                    _t["communication"] += _d
+                elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
+                    _t["data_movement"] += _d
+                elif any(k in _n for k in ("cublas","gemm","matmul","bmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
+                    _t["compute_bound"] += _d
+                else:
+                    _t["memory_bound"] += _d
         _s = sum(_t.values()) or 1
         for _k in _t:
             _t[_k] /= _s
@@ -413,16 +387,20 @@ def run_pytorch_mode():
                 torch.cuda.synchronize()
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
         for _ev in _prof.events():
-            _n = _ev.name.lower()
-            _d = _ev.self_device_time_total if hasattr(_ev, "self_device_time_total") else (_ev.self_cuda_time_total if hasattr(_ev, "self_cuda_time_total") else 0)
-            if any(k in _n for k in ("nccl","allreduce","allgather")):
-                _t["communication"] += _d
-            elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
-                _t["data_movement"] += _d
-            elif any(k in _n for k in ("cublas","gemm","matmul","bmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
-                _t["compute_bound"] += _d
-            else:
-                _t["memory_bound"] += _d
+            _candidates = getattr(_ev, "kernels", None) or [_ev]
+            for _ce in _candidates:
+                _n = _ce.name.lower()
+                _d = getattr(_ce, "self_device_time_total", getattr(_ce, "self_cuda_time_total", getattr(_ce, "cuda_time", 0)))
+                if not _d:
+                    continue
+                if any(k in _n for k in ("nccl","allreduce","allgather")):
+                    _t["communication"] += _d
+                elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
+                    _t["data_movement"] += _d
+                elif any(k in _n for k in ("cublas","gemm","matmul","bmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
+                    _t["compute_bound"] += _d
+                else:
+                    _t["memory_bound"] += _d
         _s = sum(_t.values()) or 1
         for _k in _t:
             _t[_k] /= _s
