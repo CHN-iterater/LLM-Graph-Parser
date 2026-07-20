@@ -5,6 +5,7 @@ from pathlib import Path
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from llm_graph_parser import parse_model, parse_onnx
 from llm_graph_parser.hardware import HardwareProfiler
@@ -495,7 +496,7 @@ def run_pytorch_mode():
                 )
                 logits = outputs.logits[:, -1, :].float()
                 scores = logits_processor(input_ids, logits)
-                next_token = torch.argmax(scores, dim=-1, keepdim=True)
+                next_token = torch.argmax(scores[:, :model.config.vocab_size], dim=-1, keepdim=True)
                 input_ids = torch.cat([input_ids, next_token], dim=-1)
 
                 generated_ids.append(next_token[0, 0].item())
