@@ -245,7 +245,7 @@ def _write_kernel_report(prof, output_dir, label):
     for ev in prof.key_averages():
         onnx = _op_map.get(ev.key, ev.key.replace("aten::", "").split(".")[0].upper())
         d = 0
-        for _a in ("device_time_total", "cuda_time_total", "device_time", "cuda_time"):
+        for _a in ("cpu_time_total", "self_cpu_time_total", "cpu_time"):
             _v = getattr(ev, _a, None)
             if _v is not None and isinstance(_v, (int, float)) and _v > 0:
                 d = _v
@@ -380,7 +380,7 @@ def run_pytorch_mode():
                 model(prompt_ids, **_wkw)
                 torch.cuda.synchronize()
             with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
+                activities=[torch.profiler.ProfilerActivity.CPU]
             ) as _prof:
                 with torch.no_grad():
                     _kw = {}
@@ -392,7 +392,7 @@ def run_pytorch_mode():
             for _ev in _prof.key_averages():
                 _n = _ev.key.lower()
                 _d = 0
-                for _attr in ("device_time_total", "self_device_time_total", "device_time", "cuda_time_total"):
+                for _attr in ("cpu_time_total", "self_cpu_time_total", "cpu_time"):
                     _v = getattr(_ev, _attr, None)
                     if _v is not None and isinstance(_v, (int, float)) and _v > 0:
                         _d = _v
@@ -487,7 +487,7 @@ def run_pytorch_mode():
                 model(decode_token, **_wkw)
                 torch.cuda.synchronize()
             with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
+                activities=[torch.profiler.ProfilerActivity.CPU]
             ) as _prof:
                 with torch.no_grad():
                     _kw = {}
@@ -499,7 +499,7 @@ def run_pytorch_mode():
             for _ev in _prof.key_averages():
                 _n = _ev.key.lower()
                 _d = 0
-                for _attr in ("device_time_total", "self_device_time_total", "device_time", "cuda_time_total"):
+                for _attr in ("cpu_time_total", "self_cpu_time_total", "cpu_time"):
                     _v = getattr(_ev, _attr, None)
                     if _v is not None and isinstance(_v, (int, float)) and _v > 0:
                         _d = _v
