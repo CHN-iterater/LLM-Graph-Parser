@@ -329,11 +329,31 @@ def run_pytorch_mode():
                     break
             if not _d:
                 continue
-            if any(k in _n for k in ("nccl","allreduce","allgather")):
+            if any(k in _n for k in ("nccl","allreduce","allgather","broadcast","reduce_scatter")):
                 _t["communication"] += _d
-            elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
+            elif any(k in _n for k in (
+                "memcpy","memset",
+                "aten::copy_","aten::to","aten::_to_copy",
+                "aten::cat","aten::stack",
+                "aten::transpose","aten::t","aten::permute",
+                "aten::reshape","aten::view",
+                "aten::expand","aten::expand_as",
+                "aten::slice","aten::narrow",
+                "aten::split","aten::chunk",
+                "aten::unsqueeze","aten::squeeze",
+                "aten::pad","aten::constant_pad",
+                "aten::clone",
+            )):
                 _t["data_movement"] += _d
-            elif any(k in _n for k in ("cublas","gemm","matmul","bmm","aten::mm","aten::linear","addmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
+            elif any(k in _n for k in (
+                "cublas","cutlass","gemm",
+                "aten::mm","aten::addmm","aten::bmm","aten::matmul","aten::linear",
+                "aten::_convolution","aten::conv",
+                "aten::softmax","aten::_softmax",
+                "aten::layer_norm","aten::native_layer_norm","aten::rms_norm","aten::batch_norm",
+                "aten::gelu","aten::silu","aten::relu","aten::tanh","aten::sigmoid",
+                "flash","attention",
+            )):
                 _t["compute_bound"] += _d
             else:
                 _t["memory_bound"] += _d
@@ -417,11 +437,31 @@ def run_pytorch_mode():
                     break
             if not _d:
                 continue
-            if any(k in _n for k in ("nccl","allreduce","allgather")):
+            if any(k in _n for k in ("nccl","allreduce","allgather","broadcast","reduce_scatter")):
                 _t["communication"] += _d
-            elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
+            elif any(k in _n for k in (
+                "memcpy","memset",
+                "aten::copy_","aten::to","aten::_to_copy",
+                "aten::cat","aten::stack",
+                "aten::transpose","aten::t","aten::permute",
+                "aten::reshape","aten::view",
+                "aten::expand","aten::expand_as",
+                "aten::slice","aten::narrow",
+                "aten::split","aten::chunk",
+                "aten::unsqueeze","aten::squeeze",
+                "aten::pad","aten::constant_pad",
+                "aten::clone",
+            )):
                 _t["data_movement"] += _d
-            elif any(k in _n for k in ("cublas","gemm","matmul","bmm","aten::mm","aten::linear","addmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
+            elif any(k in _n for k in (
+                "cublas","cutlass","gemm",
+                "aten::mm","aten::addmm","aten::bmm","aten::matmul","aten::linear",
+                "aten::_convolution","aten::conv",
+                "aten::softmax","aten::_softmax",
+                "aten::layer_norm","aten::native_layer_norm","aten::rms_norm","aten::batch_norm",
+                "aten::gelu","aten::silu","aten::relu","aten::tanh","aten::sigmoid",
+                "flash","attention",
+            )):
                 _t["compute_bound"] += _d
             else:
                 _t["memory_bound"] += _d
