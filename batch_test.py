@@ -210,12 +210,12 @@ def main():
 
     # 能耗汇总表（12列：2阶段 × 3类别 × 2方向）
     if energy_summary:
-        _cats = ["compute_bound", "memory_bound", "data_movement"]
+        _cats = ["compute_bound", "memory_bound", "data_movement", "communication"]
         hdr = f"  {'Model':22s}"
         for _ph in ("PF", "DC"):
             for _d in ("D1", "D2"):
                 hdr += f" {_ph}_{_d}_Tot"
-                for _c in ("Cmp", "Mem", "Mov"):
+                for _c in ("Cmp", "Mem", "Mov", "Com"):
                     hdr += f" {_ph}_{_d}_{_c:>3s}"
         print(hdr)
         print(f"  {'-' * 22} {'-' * (len(hdr)-26)}")
