@@ -395,6 +395,28 @@ def run_pytorch_mode():
     dc = decode_graph.get_stage_stats("decode")
     dc_flops_per = dc["total_flops"]
     print(f"    decode per-step: ops={dc['num_ops']}, FLOPs={dc_flops_per/1e6:.2f}M, AI={dc['arith_intensity']:.2f}")
+    # ---- Subprocess profiling (isolated from main CUDA context) ----
+    if HARDWARE_PROFILING:
+        import subprocess as _sp, json as _js
+        _prof_script = os.path.join(os.path.dirname(__file__), "profile_kernels.py")
+        _all_cats = ["compute_bound", "memory_bound", "data_movement", "communication"]
+        for _ph in ("prefill", "decode"):
+            try:
+                _res = _sp.run([sys.executable, _prof_script, MODEL_SOURCE, PROMPT, _ph],
+                               capture_output=True, text=True, timeout=120)
+                if _res.returncode != 0:
+                    continue
+                _dat = _js.loads(_res.stdout.strip().splitlines()[-1])
+                with open(ts_path, "a") as _tf:
+                    for _ck in _all_cats:
+                        print(f"{_ph}_kernel_ratio_{_ck} {_dat[_ck]:.4f}", file=_tf)
+                print(f"    kernel profile {_ph}: " +
+                      f"compute={_dat['compute_bound']*100:.0f}% " +
+                      f"memory={_dat['memory_bound']*100:.0f}% " +
+                      f"move={_dat['data_movement']*100:.0f}%")
+            except Exception:
+                print(f"    kernel profile {_ph}: skipped")
+
 
     # Step 3: Generation
     if SKIP_GENERATION:
