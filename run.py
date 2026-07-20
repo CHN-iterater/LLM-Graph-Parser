@@ -417,7 +417,8 @@ def run_pytorch_mode():
                       f"memory={_dat['memory_bound']*100:.0f}% " +
                       f"move={_dat['data_movement']*100:.0f}%")
             except Exception:
-                print(f"    kernel profile {_ph}: skipped")
+                print(f"    kernel profile {_ph}: skipped - try running manually")
+                print(f"    cmd: {[sys.executable, _prof_script, MODEL_SOURCE, PROMPT, _ph]}")
 
 
     # Step 3: Generation
