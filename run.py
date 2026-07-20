@@ -5,7 +5,6 @@ from pathlib import Path
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from llm_graph_parser import parse_model, parse_onnx
 from llm_graph_parser.hardware import HardwareProfiler
@@ -247,47 +246,6 @@ def _summary_extra(graph, combined, decode_graph, gen_len, pf_ai, profiler=None)
 def _ts():
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-
-def _write_kernel_report(prof, output_dir, label):
-    from collections import defaultdict
-    op_map = {
-        "aten::mm": "GEMM", "aten::linear": "LINEAR", "aten::addmm": "GEMM",
-        "aten::softmax": "SOFTMAX", "aten::layer_norm": "LAYER_NORM",
-        "aten::gelu": "GELU", "aten::silu": "SiLU", "aten::relu": "RELU",
-        "aten::embedding": "EMBEDDING",
-        "aten::copy_": "COPY", "aten::cat": "CAT", "aten::slice": "SLICE",
-        "aten::transpose": "TRANSPOSE", "aten::reshape": "RESHAPE",
-        "aten::view": "RESHAPE", "aten::expand": "EXPAND",
-        "aten::add": "ADD", "aten::mul": "MUL", "aten::div": "DIV",
-        "aten::sub": "ADD", "aten::pow": "POW", "aten::sqrt": "SQRT",
-        "aten::neg": "NEG", "aten::sum": "REDUCESUM", "aten::mean": "REDUCEMEAN",
-    }
-    data = defaultdict(lambda: defaultdict(float))
-    for ev in prof.key_averages():
-        onnx = op_map.get(ev.key, ev.key.replace("aten::", "").split(".")[0].upper())
-        d = 0
-        for a in ("cpu_time_total", "self_cpu_time_total", "cpu_time"):
-            v = getattr(ev, a, None)
-            if v is not None and isinstance(v, (int, float)) and v > 0:
-                d = v
-                break
-        if not d:
-            continue
-        data[onnx][ev.key] += d
-    if not data:
-        return
-    path = os.path.join(output_dir, f"{label}_kernel_report.txt")
-    with open(path, "w", encoding="utf-8") as f:
-        print(f"# Kernel breakdown: {label}", file=f)
-        print(f"{'Op':20s} {'Total(us)':>10s}  {'Top Kernels':55s}", file=f)
-        print("-" * 85, file=f)
-        for op in sorted(data, key=lambda x: sum(data[x].values()), reverse=True):
-            total = sum(data[op].values())
-            kerns = ", ".join(f"{n.split(':')[-1][:25]}:{t:.0f}"
-                            for n, t in sorted(data[op].items(), key=lambda x: -x[1])[:5])
-            print(f"{op:20s} {total:>8.0f}   {kerns:55s}", file=f)
-    print(f"    kernel report -> {path}")
-
 def run_pytorch_mode():
     from transformers import AutoModelForCausalLM, AutoTokenizer
     import torch
@@ -300,7 +258,7 @@ def run_pytorch_mode():
     # 在 CUDA 初始化前测量 GPU 0 真实空闲功率
     write_timestamp("idle_before_start", ts_path)
     write_energy("idle_before_start", ts_path)
-    import time; time.sleep(10)
+    import time; time.sleep(2)
     write_timestamp("idle_before_end", ts_path)
     write_energy("idle_before_end", ts_path)
 
@@ -372,7 +330,7 @@ def run_pytorch_mode():
         time.sleep(1.0)
         print(f"done, starting measurement")
 
-    # Step 1b: Prefill measurement (CPU profiler in first forward)
+    # Step 1b: Prefill 能耗测量（稳态下的 forward）
     write_timestamp("prefill_start", ts_path)
     write_energy("prefill_start", ts_path)
     print(f"  [Phase 1/3] Prefill (profiling, {PROFILING_RUNS} runs)")
@@ -385,40 +343,10 @@ def run_pytorch_mode():
         total_gpu_us = profiler._prefill_total_us * PROFILING_RUNS
         print(f"    time={profiler._prefill_total_us/1000:.2f}ms (per run), total GPU time={total_gpu_us/1000:.2f}ms")
         with open(ts_path, "a") as tf:
-            print(f"prefill_gpu_us {total_gpu_us}", file=tf)
+            tf.write(f"prefill_gpu_us {int(total_gpu_us)}\n")
     write_energy("prefill_end", ts_path)
     write_timestamp("prefill_end", ts_path)
 
-    if _pf_prof is not None:
-        _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
-        for _ev in _pf_prof.key_averages():
-            _n = _ev.key.lower()
-            _d = 0
-            for _a in ("cpu_time_total", "self_cpu_time_total", "cpu_time"):
-                _v = getattr(_ev, _a, None)
-                if _v is not None and isinstance(_v, (int, float)) and _v > 0:
-                    _d = _v
-                    break
-            if not _d:
-                continue
-            if any(k in _n for k in ("nccl","allreduce","allgather","broadcast","reduce_scatter")):
-                _t["communication"] += _d
-            elif any(k in _n for k in ("memcpy","memset","aten::copy_","aten::to","aten::cat","aten::transpose","aten::permute","aten::reshape","aten::view","aten::expand","aten::slice","aten::split","aten::clone")):
-                _t["data_movement"] += _d
-            elif any(k in _n for k in ("cublas","cutlass","gemm","aten::mm","aten::addmm","aten::bmm","aten::matmul","aten::linear","aten::_convolution","aten::conv","aten::softmax","aten::layer_norm","aten::native_layer_norm","aten::rms_norm","aten::gelu","aten::silu","aten::relu","aten::tanh","aten::sigmoid","flash","attention")):
-                _t["compute_bound"] += _d
-            else:
-                _t["memory_bound"] += _d
-        _s = sum(_t.values()) or 1
-        for _k in _t:
-            _t[_k] /= _s
-        with open(ts_path, "a") as _tf:
-            print(f"prefill_kernel_ratio_compute {_t['compute_bound']:.4f}", file=_tf)
-            print(f"prefill_kernel_ratio_memory {_t['memory_bound']:.4f}", file=_tf)
-            print(f"prefill_kernel_ratio_data_movement {_t['data_movement']:.4f}", file=_tf)
-            print(f"prefill_kernel_ratio_communication {_t['communication']:.4f}", file=_tf)
-        print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
-        _write_kernel_report(_pf_prof, output_dir, "prefill")
     # 冷却 10s，让 GPU 温度在 decode 测量前回落到接近 idle
     if HARDWARE_PROFILING and profiler.available:
         print(f"  [cooling] 30s...", end=" ", flush=True)
@@ -442,76 +370,32 @@ def run_pytorch_mode():
                 torch.cuda.synchronize()
         time.sleep(1.0)
         print(f"done, starting measurement")
-    _dc_prof = None
     write_timestamp("decode_start", ts_path)
     write_energy("decode_start", ts_path)
-    print(f"  [Phase 2/3] Decode (profiling, {PROFILING_RUNS} runs)")
     if HARDWARE_PROFILING and profiler.available:
         _ = profiler.time_forward(model, decode_token, label="decode", num_runs=PROFILING_RUNS, **dc_kwargs)
         total_dc_gpu_us = profiler._decode_total_us * PROFILING_RUNS
         with open(ts_path, "a") as tf:
-            print(f"decode_gpu_us {total_dc_gpu_us}", file=tf)
-
-
-    if _dc_prof is not None:
-        _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
-        for _ev in _dc_prof.key_averages():
-            _n = _ev.key.lower()
-            _d = 0
-            for _a in ("cpu_time_total", "self_cpu_time_total", "cpu_time"):
-                _v = getattr(_ev, _a, None)
-                if _v is not None and isinstance(_v, (int, float)) and _v > 0:
-                    _d = _v
-                    break
-            if not _d:
-                continue
-            if any(k in _n for k in ("nccl","allreduce","allgather","broadcast","reduce_scatter")):
-                _t["communication"] += _d
-            elif any(k in _n for k in ("memcpy","memset","aten::copy_","aten::to","aten::cat","aten::transpose","aten::permute","aten::reshape","aten::view","aten::expand","aten::slice","aten::split","aten::clone")):
-                _t["data_movement"] += _d
-            elif any(k in _n for k in ("cublas","cutlass","gemm","aten::mm","aten::addmm","aten::bmm","aten::matmul","aten::linear","aten::_convolution","aten::conv","aten::softmax","aten::layer_norm","aten::native_layer_norm","aten::rms_norm","aten::gelu","aten::silu","aten::relu","aten::tanh","aten::sigmoid","flash","attention")):
-                _t["compute_bound"] += _d
-            else:
-                _t["memory_bound"] += _d
-        _s = sum(_t.values()) or 1
-        for _k in _t:
-            _t[_k] /= _s
-        with open(ts_path, "a") as _tf:
-            print(f"decode_kernel_ratio_compute {_t['compute_bound']:.4f}", file=_tf)
-            print(f"decode_kernel_ratio_memory {_t['memory_bound']:.4f}", file=_tf)
-            print(f"decode_kernel_ratio_data_movement {_t['data_movement']:.4f}", file=_tf)
-            print(f"decode_kernel_ratio_communication {_t['communication']:.4f}", file=_tf)
-        print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
-        _write_kernel_report(_dc_prof, output_dir, "decode")
-    if HARDWARE_PROFILING and profiler.available:
-        start_ev = torch.cuda.Event(enable_timing=True)
-        end_ev = torch.cuda.Event(enable_timing=True)
-        start_ev.record()
-        with torch.no_grad():
-            for i in range(PROFILING_RUNS):
-                if i == 0:
-                    try:
-                        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as p:
-                            model(decode_token, **dc_kwargs)
-                            torch.cuda.synchronize()
-                        _dc_prof = p
-                    except Exception:
-                        model(decode_token, **dc_kwargs)
-                        torch.cuda.synchronize()
-                else:
-                    model(decode_token, **dc_kwargs)
-                    torch.cuda.synchronize()
-        end_ev.record()
-        torch.cuda.synchronize()
-        total_dc_gpu_us = int(start_ev.elapsed_time(end_ev) * 1000)
-        per_run_us = total_dc_gpu_us // PROFILING_RUNS
-        profiler._decode_total_us = per_run_us
-        print(f"    time={per_run_us/1000:.2f}ms (per run), total GPU time={total_dc_gpu_us/1000:.2f}ms")
-        with open(ts_path, "a") as tf:
-            print(f"decode_gpu_us {total_dc_gpu_us}", file=tf)
+            tf.write(f"decode_gpu_us {int(total_dc_gpu_us)}\n")
     write_energy("decode_end", ts_path)
     write_timestamp("decode_end", ts_path)
     print(f"  [Phase 2/3] Decode ({PROFILING_RUNS} token forwards)")
+
+    # ONNX 导出
+    prefill_graph = parse_model(model, prompt_ids, model_name=model_label, onnx_path="")
+    prefill_graph.prompt_text = prompt
+    prefill_graph.prompt_tokens = seq_len
+    prefill_graph.tag_unassigned_as("prefill")
+    pf = prefill_graph.get_stage_stats("prefill")
+    print(f"    prefill ops={pf['num_ops']}, FLOPs={pf['total_flops']/1e6:.2f}M, AI={pf['arith_intensity']:.2f}")
+
+    decode_graph = parse_model(model, decode_token, model_name=model_label, onnx_path="")
+    decode_graph.prompt_tokens = 1
+    decode_graph.tag_unassigned_as("decode")
+    dc = decode_graph.get_stage_stats("decode")
+    dc_flops_per = dc["total_flops"]
+    print(f"    decode per-step: ops={dc['num_ops']}, FLOPs={dc_flops_per/1e6:.2f}M, AI={dc['arith_intensity']:.2f}")
+
     # Step 3: Generation
     if SKIP_GENERATION:
         gen_len, answer = 0, ""
@@ -589,7 +473,7 @@ def run_pytorch_mode():
                 )
                 logits = outputs.logits[:, -1, :].float()
                 scores = logits_processor(input_ids, logits)
-                next_token = torch.argmax(scores[:, :model.config.vocab_size], dim=-1, keepdim=True)
+                next_token = torch.argmax(scores, dim=-1, keepdim=True)
                 input_ids = torch.cat([input_ids, next_token], dim=-1)
 
                 generated_ids.append(next_token[0, 0].item())
