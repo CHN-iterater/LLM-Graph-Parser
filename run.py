@@ -398,7 +398,7 @@ def run_pytorch_mode():
     print(f"    decode per-step: ops={dc['num_ops']}, FLOPs={dc_flops_per/1e6:.2f}M, AI={dc['arith_intensity']:.2f}")
     # ---- Subprocess profiling (isolated from main CUDA context) ----
     if HARDWARE_PROFILING:
-        import subprocess as _sp, json as _js
+        import subprocess as _sp, json as _js, sys
         _prof_script = os.path.join(os.path.dirname(__file__), "profile_kernels.py")
         _all_cats = ["compute_bound", "memory_bound", "data_movement", "communication"]
         for _ph in ("prefill", "decode"):
@@ -417,8 +417,7 @@ def run_pytorch_mode():
                       f"memory={_dat['memory_bound']*100:.0f}% " +
                       f"move={_dat['data_movement']*100:.0f}%")
             except Exception:
-                print(f"    kernel profile {_ph}: skipped - try running manually")
-                print(f"    cmd: {[sys.executable, _prof_script, MODEL_SOURCE, PROMPT, _ph]}")
+                print(f"    kernel profile {_ph}: skipped")
 
 
     # Step 3: Generation
