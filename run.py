@@ -461,6 +461,7 @@ def run_pytorch_mode():
                 torch.cuda.synchronize()
         time.sleep(1.0)
         print(f"done, starting measurement")
+    _dc_prof = None
     write_timestamp("decode_start", ts_path)
     write_energy("decode_start", ts_path)
     print(f"  [Phase 2/3] Decode (profiling, {PROFILING_RUNS} runs)")
@@ -495,7 +496,6 @@ def run_pytorch_mode():
             print(f"decode_kernel_ratio_communication {_t['communication']:.4f}", file=_tf)
         print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
         _write_kernel_report(_dc_prof, output_dir, "decode")
-    _dc_prof = None
     if HARDWARE_PROFILING and profiler.available:
         start_ev = torch.cuda.Event(enable_timing=True)
         end_ev = torch.cuda.Event(enable_timing=True)
