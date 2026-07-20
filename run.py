@@ -376,34 +376,14 @@ def run_pytorch_mode():
     write_timestamp("prefill_start", ts_path)
     write_energy("prefill_start", ts_path)
     print(f"  [Phase 1/3] Prefill (profiling, {PROFILING_RUNS} runs)")
-    _pf_prof = None
     if HARDWARE_PROFILING and profiler.available:
         pf_kwargs = {}
         if attention_mask is not None:
             pf_kwargs["attention_mask"] = attention_mask
-        start_ev = torch.cuda.Event(enable_timing=True)
-        end_ev = torch.cuda.Event(enable_timing=True)
-        start_ev.record()
-        with torch.no_grad():
-            for i in range(PROFILING_RUNS):
-                if i == 0:
-                    try:
-                        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as p:
-                            model(prompt_ids, **pf_kwargs)
-                            torch.cuda.synchronize()
-                        _pf_prof = p
-                    except Exception:
-                        model(prompt_ids, **pf_kwargs)
-                        torch.cuda.synchronize()
-                else:
-                    model(prompt_ids, **pf_kwargs)
-                    torch.cuda.synchronize()
-        end_ev.record()
-        torch.cuda.synchronize()
-        total_gpu_us = int(start_ev.elapsed_time(end_ev) * 1000)
-        per_run_us = total_gpu_us // PROFILING_RUNS
-        profiler._prefill_total_us = per_run_us
-        print(f"    time={per_run_us/1000:.2f}ms (per run), total GPU time={total_gpu_us/1000:.2f}ms")
+        _ = profiler.time_forward(model, prompt_ids, label="prefill", num_runs=PROFILING_RUNS, **pf_kwargs)
+    if HARDWARE_PROFILING and profiler.available:
+        total_gpu_us = profiler._prefill_total_us * PROFILING_RUNS
+        print(f"    time={profiler._prefill_total_us/1000:.2f}ms (per run), total GPU time={total_gpu_us/1000:.2f}ms")
         with open(ts_path, "a") as tf:
             print(f"prefill_gpu_us {total_gpu_us}", file=tf)
     write_energy("prefill_end", ts_path)
@@ -466,6 +446,12 @@ def run_pytorch_mode():
     write_timestamp("decode_start", ts_path)
     write_energy("decode_start", ts_path)
     print(f"  [Phase 2/3] Decode (profiling, {PROFILING_RUNS} runs)")
+    if HARDWARE_PROFILING and profiler.available:
+        _ = profiler.time_forward(model, decode_token, label="decode", num_runs=PROFILING_RUNS, **dc_kwargs)
+        total_dc_gpu_us = profiler._decode_total_us * PROFILING_RUNS
+        with open(ts_path, "a") as tf:
+            print(f"decode_gpu_us {total_dc_gpu_us}", file=tf)
+
 
     if _dc_prof is not None:
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
