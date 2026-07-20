@@ -140,10 +140,11 @@ def main():
                     _cur = "dc"
                 elif "compute=" in ls and _cur:
                     _d = {}
+                    _cmap = {"compute": "compute_bound", "memory": "memory_bound", "move": "data_movement"}
                     for _kv in ls.split():
                         if "=" in _kv:
                             k, v = _kv.split("=", 1)
-                            _d[k] = float(v.replace("J", ""))
+                            _d[_cmap.get(k, k)] = float(v.replace("J", ""))
                     if _cur == "pf":
                         pf2cats = _d
                     else:
