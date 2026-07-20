@@ -66,6 +66,7 @@ def main():
     p.add_argument("--max-new-tokens", type=int, default=MAX_NEW_TOKENS)
     p.add_argument("--runs", type=int, default=PROFILING_RUNS)
     p.add_argument("--gen-len", type=int, default=GEN_LEN)
+    p.add_argument("--gen-repeats", type=int, default=None, help="生成阶段每步重复次数")
     p.add_argument("--no-hardware", action="store_true", help="禁用 hardware profiling")
     args = p.parse_args()
 
@@ -94,6 +95,8 @@ def main():
         run_args = [sys.executable, "run.py", "--model", model_name, "--prompt", args.prompt,
                      "--max-new-tokens", str(args.max_new_tokens),
                      "--runs", str(args.runs)]
+        if args.gen_repeats is not None:
+            run_args += ["--gen-repeats", str(args.gen_repeats)]
         if args.no_hardware:
             run_args.append("--no-hardware")
         ok, _ = run_cmd(run_args, f"{model_name}: run.py")
@@ -118,6 +121,7 @@ def main():
              "--gen-len", str(args.gen_len)],
             f"{model_name}: power_analyze", capture=True)
         pf2 = dc2 = None
+        pf2cats = dc2cats = None
         if ok:
             import re
             for line in pa_out.split("\n"):
@@ -127,6 +131,24 @@ def main():
                 m = re.search(r"Decode.*?(\d+\.\d+)J", line)
                 if m:
                     dc2 = float(m.group(1))
+            _cur = None
+            for line in pa_out.split("\n"):
+                ls = line.strip()
+                if ls.startswith("Prefill"):
+                    _cur = "pf"
+                elif ls.startswith("Decode"):
+                    _cur = "dc"
+                elif "compute=" in ls and _cur:
+                    _d = {}
+                    for _kv in ls.split():
+                        if "=" in _kv:
+                            k, v = _kv.split("=", 1)
+                            _d[k] = float(v.replace("J", ""))
+                    if _cur == "pf":
+                        pf2cats = _d
+                    else:
+                        dc2cats = _d
+                    _cur = None
         else:
             results.append((model_name, "FAILED at power_analyze"))
             continue
@@ -147,7 +169,21 @@ def main():
                 if "--- Decode" in ls:
                     dc1 = _parse_energy(ec_lines, i)
 
-        # Step 4: graph_operator_extractor.py（可选，失败不阻塞）
+        # Step 4: Direction 1 category breakdown
+        pf1cats = dc1cats = None
+        if graph_path.exists():
+            try:
+                from energy_consumption_refactor import estimate_by_category
+                import json
+                with open(graph_path) as _fg:
+                    _gdata = json.load(_fg)
+                _gnodes = _gdata.get("nodes", [])
+                pf1cats = estimate_by_category(_gnodes, stage="prefill")
+                dc1cats = estimate_by_category(_gnodes, stage="decode")
+            except Exception:
+                pass
+
+        # Step 5: graph_operator_extractor.py（可选，失败不阻塞）
         run_cmd(
             [sys.executable, "graph_operator_extractor.py", "-g", str(graph_path)],
             f"{model_name}: graph_operator_extractor")
@@ -155,7 +191,7 @@ def main():
         status = "OK"
         if pf1 is None:
             status = "D2 OK (D1 N/A)"
-        energy_summary[model_name] = (pf1, pf2, dc1, dc2)
+        energy_summary[model_name] = (pf1, pf2, dc1, dc2, pf1cats, dc1cats, pf2cats, dc2cats)
         results.append((model_name, status))
 
         # 冷却等待（让 GPU 降温后再测下一个模型）
@@ -172,16 +208,32 @@ def main():
     print(f"  Batch Test Summary")
     print(f"{'#' * 70}")
 
-    # 能耗汇总表
+    # 能耗汇总表（12列：2阶段 × 3类别 × 2方向）
     if energy_summary:
-        print(f"  {'Model':28s} {'Prefill(Dir1)':>13s} {'Prefill(Dir2)':>13s} {'Decode(Dir1)':>13s} {'Decode(Dir2)':>13s}")
-        print(f"  {'-' * 28} {'-' * 13} {'-' * 13} {'-' * 13} {'-' * 13}")
-        for name, (pf1, pf2, dc1, dc2) in sorted(energy_summary.items()):
-            a = f"{pf1:.2f}J" if pf1 is not None else "N/A"
-            b = f"{pf2:.2f}J" if pf2 is not None else "N/A"
-            c = f"{dc1:.2f}J" if dc1 is not None else "N/A"
-            d = f"{dc2:.2f}J" if dc2 is not None else "N/A"
-            print(f"  {name:28s} {a:>13s} {b:>13s} {c:>13s} {d:>13s}")
+        _cats = ["compute_bound", "memory_bound", "data_movement"]
+        hdr = f"  {'Model':22s}"
+        for _ph in ("PF", "DC"):
+            for _d in ("D1", "D2"):
+                hdr += f" {_ph}_{_d}_Tot"
+                for _c in ("Cmp", "Mem", "Mov"):
+                    hdr += f" {_ph}_{_d}_{_c:>3s}"
+        print(hdr)
+        print(f"  {'-' * 22} {'-' * (len(hdr)-26)}")
+        for name, (pf1, pf2, dc1, dc2, pf1c, dc1c, pf2c, dc2c) in sorted(energy_summary.items()):
+            def _fv(v):
+                return f"{v*1000:.1f}" if v is not None else "N/A"
+            def _fc(d):
+                return tuple(f"{d.get(c,0)*1000:.1f}" if d else "N/A" for c in _cats)
+            row = f"  {name:22s}"
+            for _te, _tc in [(pf1, pf1c), (pf2, pf2c)]:
+                row += f" {_fv(_te):>7s}"
+                for _v in _fc(_tc):
+                    row += f" {_v:>6s}"
+            for _te, _tc in [(dc1, dc1c), (dc2, dc2c)]:
+                row += f" {_fv(_te):>7s}"
+                for _v in _fc(_tc):
+                    row += f" {_v:>6s}"
+            print(row)
         print()
 
     print(f"  {'Model':30s}  {'Status':>20s}")

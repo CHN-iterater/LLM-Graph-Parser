@@ -126,6 +126,36 @@ FORMULA_NAME = {
     "DIV": "DIV", "SUB": "ADD",
 }
 
+# 算子 → 能耗类别（compute_bound/memory_bound/data_movement/communication）
+OP_CAT: dict[str, str] = {}
+for _k, _f in _FORMULAS.items():
+    if _k in ("AllReduce", "AllGather"):
+        OP_CAT[_k] = "communication"
+    elif _f[0] == "N*M*K":
+        OP_CAT[_k] = "compute_bound"
+    elif _f[0] in ("N*M", "N*M*K") and len(_f) >= 5 and _f[3] == "const":
+        OP_CAT[_k] = "data_movement"
+    elif _f[0] == "N,M" and len(_f) >= 7 and _f[5] == "const":
+        OP_CAT[_k] = "data_movement"
+    else:
+        OP_CAT[_k] = "memory_bound"
+ONNX_CAT: dict[str, str] = {}
+for _onnx_op, _fk in FORMULA_NAME.items():
+    ONNX_CAT[_onnx_op] = OP_CAT.get(_fk, "memory_bound")
+
+
+def estimate_by_category(nodes, stage=None):
+    """按类别分组估算能耗，返回 {category: energy_J}。"""
+    from collections import defaultdict
+    result = defaultdict(float)
+    for n in nodes:
+        if stage and n.get("stage") != stage:
+            continue
+        op = n.get("op_type", "UNKNOWN")
+        e = estimate(n)
+        result[ONNX_CAT.get(op, "memory_bound")] += e
+    return dict(result)
+
 
 def energy_j(N, M, K, formula_key):
     f = _FORMULAS[formula_key]

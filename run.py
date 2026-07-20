@@ -330,7 +330,38 @@ def run_pytorch_mode():
         time.sleep(1.0)
         print(f"done, starting measurement")
 
-    # Step 1b: Prefill 能耗测量（稳态下的 forward）
+    # ---- Kernel classification profiling (outside measurement) ----
+    if HARDWARE_PROFILING and profiler.available:
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as _prof:
+            with torch.no_grad():
+                _kw = {}
+                if attention_mask is not None:
+                    _kw["attention_mask"] = attention_mask
+                model(prompt_ids, **_kw)
+                torch.cuda.synchronize()
+        _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
+        for _ev in _prof.events():
+            _n = _ev.name.lower()
+            _d = _ev.duration_us
+            if any(k in _n for k in ("nccl","allreduce","allgather")):
+                _t["communication"] += _d
+            elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
+                _t["data_movement"] += _d
+            elif any(k in _n for k in ("cublas","gemm","matmul","bmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
+                _t["compute_bound"] += _d
+            else:
+                _t["memory_bound"] += _d
+        _s = sum(_t.values()) or 1
+        for _k in _t:
+            _t[_k] /= _s
+        with open(ts_path, "a") as _tf:
+            _tf.write(f"prefill_kernel_ratio_compute {_t['compute_bound']:.4f}\n")
+            _tf.write(f"prefill_kernel_ratio_memory {_t['memory_bound']:.4f}\n")
+            _tf.write(f"prefill_kernel_ratio_data_movement {_t['data_movement']:.4f}\n")
+            _tf.write(f"prefill_kernel_ratio_communication {_t['communication']:.4f}\n")
+        print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
+
+    # Step 1b: Prefill 能耗测量
     write_timestamp("prefill_start", ts_path)
     write_energy("prefill_start", ts_path)
     print(f"  [Phase 1/3] Prefill (profiling, {PROFILING_RUNS} runs)")
@@ -370,6 +401,38 @@ def run_pytorch_mode():
                 torch.cuda.synchronize()
         time.sleep(1.0)
         print(f"done, starting measurement")
+
+    # ---- Decode kernel classification (outside measurement) ----
+    if HARDWARE_PROFILING and profiler.available:
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as _prof:
+            with torch.no_grad():
+                _kw = {}
+                if attention_mask is not None:
+                    _kw["attention_mask"] = attention_mask[:, -1:]
+                model(decode_token, **_kw)
+                torch.cuda.synchronize()
+        _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
+        for _ev in _prof.events():
+            _n = _ev.name.lower()
+            _d = _ev.duration_us
+            if any(k in _n for k in ("nccl","allreduce","allgather")):
+                _t["communication"] += _d
+            elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
+                _t["data_movement"] += _d
+            elif any(k in _n for k in ("cublas","gemm","matmul","bmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
+                _t["compute_bound"] += _d
+            else:
+                _t["memory_bound"] += _d
+        _s = sum(_t.values()) or 1
+        for _k in _t:
+            _t[_k] /= _s
+        with open(ts_path, "a") as _tf:
+            _tf.write(f"decode_kernel_ratio_compute {_t['compute_bound']:.4f}\n")
+            _tf.write(f"decode_kernel_ratio_memory {_t['memory_bound']:.4f}\n")
+            _tf.write(f"decode_kernel_ratio_data_movement {_t['data_movement']:.4f}\n")
+            _tf.write(f"decode_kernel_ratio_communication {_t['communication']:.4f}\n")
+        print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
+
     write_timestamp("decode_start", ts_path)
     write_energy("decode_start", ts_path)
     if HARDWARE_PROFILING and profiler.available:
