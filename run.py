@@ -434,10 +434,19 @@ def run_pytorch_mode():
             prefix_allowed_tokens_fn=None,
             logits_processor=LogitsProcessorList(),
         )
-        stopping_criteria = model._get_stopping_criteria(
-            generation_config=gen_config,
-            stopping_criteria=StoppingCriteriaList(),
-        )
+        try:
+            stopping_criteria = model._get_stopping_criteria(
+                generation_config=gen_config,
+                stopping_criteria=StoppingCriteriaList(),
+            )
+        except (AttributeError, TypeError):
+            eos = gen_config.eos_token_id or getattr(tokenizer, "eos_token_id", None) or []
+            if not isinstance(eos, list):
+                eos = [eos]
+            class _EosStop:
+                def __call__(self, ids, *a, **kw):
+                    return ids[:, -1].item() in eos
+            stopping_criteria = _EosStop()
 
         # 逐位置生成 + 测量：每个位置重复 GEN_REPEATS 次 forward（KV cache 不变态）
         input_ids = prompt_ids.clone()

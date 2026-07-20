@@ -209,26 +209,14 @@ def main():
 
     # 能耗汇总表
     if energy_summary:
-        _cats = ["compute_bound", "memory_bound", "data_movement", "communication"]
-        hdr = f"  {'Model':22s}"
-        for _ph in ("PF", "DC"):
-            for _d in ("D1", "D2"):
-                hdr += f" {_ph}_{_d}_Tot"
-                for _c in ("Cmp", "Mem", "Mov", "Com"):
-                    hdr += f" {_ph}_{_d}_{_c:>3s}"
-        print(hdr)
-        print(f"  {'-' * 22} {'-' * (len(hdr)-26)}")
-        for name, (pf1, pf2, dc1, dc2, pf1c, dc1c, pf2c, dc2c) in sorted(energy_summary.items()):
-            def _fv(v):
-                return f"{v*1000:.1f}" if v is not None else "N/A"
-            def _fc(d):
-                return tuple(f"{d.get(c,0)*1000:.1f}" if d else "N/A" for c in _cats)
-            row = f"  {name:22s}"
-            for _te, _tc in [(pf1, pf1c), (pf2, pf2c), (dc1, dc1c), (dc2, dc2c)]:
-                row += f" {_fv(_te):>7s}"
-                for _v in _fc(_tc):
-                    row += f" {_v:>6s}"
-            print(row)
+        print(f"  {'Model':28s} {'Prefill(Dir1)':>13s} {'Prefill(Dir2)':>13s} {'Decode(Dir1)':>13s} {'Decode(Dir2)':>13s}")
+        print(f"  {'-' * 28} {'-' * 13} {'-' * 13} {'-' * 13} {'-' * 13}")
+        for name, (pf1, pf2, dc1, dc2, *_) in sorted(energy_summary.items()):
+            a = f"{pf1:.2f}J" if pf1 is not None else "N/A"
+            b = f"{pf2:.2f}J" if pf2 is not None else "N/A"
+            c = f"{dc1:.2f}J" if dc1 is not None else "N/A"
+            d = f"{dc2:.2f}J" if dc2 is not None else "N/A"
+            print(f"  {name:28s} {a:>13s} {b:>13s} {c:>13s} {d:>13s}")
         print()
 
     # ---- Save results to CSV ----
