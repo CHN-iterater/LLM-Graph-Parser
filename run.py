@@ -386,8 +386,7 @@ def run_pytorch_mode():
         profiler._prefill_total_us = per_run_us
         print(f"    time={per_run_us/1000:.2f}ms (per run), total GPU time={total_gpu_us/1000:.2f}ms")
         with open(ts_path, "a") as tf:
-            tf.write(f"prefill_gpu_us {int(total_gpu_us)}
-")
+            tf.write(f"prefill_gpu_us {int(total_gpu_us)}\n")
     write_energy("prefill_end", ts_path)
     write_timestamp("prefill_end", ts_path)
 
@@ -416,14 +415,10 @@ def run_pytorch_mode():
         for _k in _t:
             _t[_k] /= _s
         with open(ts_path, "a") as _tf:
-            _tf.write(f"prefill_kernel_ratio_compute {_t['compute_bound']:.4f}
-")
-            _tf.write(f"prefill_kernel_ratio_memory {_t['memory_bound']:.4f}
-")
-            _tf.write(f"prefill_kernel_ratio_data_movement {_t['data_movement']:.4f}
-")
-            _tf.write(f"prefill_kernel_ratio_communication {_t['communication']:.4f}
-")
+            _tf.write(f"prefill_kernel_ratio_compute {_t['compute_bound']:.4f}\n")
+            _tf.write(f"prefill_kernel_ratio_memory {_t['memory_bound']:.4f}\n")
+            _tf.write(f"prefill_kernel_ratio_data_movement {_t['data_movement']:.4f}\n")
+            _tf.write(f"prefill_kernel_ratio_communication {_t['communication']:.4f}\n")
         print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
         _write_kernel_report(_pf_prof, output_dir, "prefill")
 
