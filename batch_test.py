@@ -183,10 +183,10 @@ def main():
             except Exception:
                 pass
 
-        # Step 5: graph_operator_extractor.py（可选，失败不阻塞）
+        # Step 5: graph_operator_extractor.py（不显示详细输出）
         run_cmd(
             [sys.executable, "graph_operator_extractor.py", "-g", str(graph_path)],
-            f"{model_name}: graph_operator_extractor")
+            f"{model_name}: graph_operator_extractor", capture=True)
 
         status = "OK"
         if pf1 is None:
@@ -235,6 +235,41 @@ def main():
                     row += f" {_v:>6s}"
             print(row)
         print()
+
+    # ---- Save results to CSV ----
+    if energy_summary:
+        _out_csv = OUTPUT_DIR / f"batch_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        _metrics = [
+            ("Total Energy", None, None),
+            ("Compute", None, "compute_bound"),
+            ("Memory", None, "memory_bound"),
+            ("Data Movement", None, "data_movement"),
+            ("Communication", None, "communication"),
+        ]
+        with open(_out_csv, "w", newline="", encoding="utf-8-sig") as _f:
+            _w = csv.writer(_f)
+            for _mname, _, _cat in _metrics:
+                _w.writerow([_mname, "", "", "", "", "", ""])
+                _w.writerow(["Model", "Prefill_D1(J)", "Prefill_D2(J)", "Prefill_Err%",
+                             "Decode_D1(J)", "Decode_D2(J)", "Decode_Err%"])
+                for _md_name, (pf1, pf2, dc1, dc2, pf1c, dc1c, pf2c, dc2c) in sorted(energy_summary.items()):
+                    def _ge(d, k):
+                        return d.get(k, 0) if d else 0
+                    def _err(v1, v2):
+                        if v2 and v2 != 0:
+                            return f"{(v1/v2-1)*100:.1f}"
+                        return "N/A"
+                    if _cat is None:
+                        _p1, _p2, _d1, _d2 = pf1 or 0, pf2 or 0, dc1 or 0, dc2 or 0
+                    else:
+                        _p1 = _ge(pf1c, _cat)
+                        _p2 = _ge(pf2c, _cat)
+                        _d1 = _ge(dc1c, _cat)
+                        _d2 = _ge(dc2c, _cat)
+                    _w.writerow([_md_name, f"{_p1:.4f}", f"{_p2:.4f}", _err(_p1, _p2),
+                                 f"{_d1:.4f}", f"{_d2:.4f}", _err(_d1, _d2)])
+                _w.writerow([])
+        print(f"  Results saved to: {_out_csv}")
 
     print(f"  {'Model':30s}  {'Status':>20s}")
     print(f"  {'-' * 52}")

@@ -302,7 +302,9 @@ def run_pytorch_mode():
 
     # ---- Kernel classification profiling (outside measurement) ----
     if HARDWARE_PROFILING and profiler.available:
-        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as _prof:
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
+        ) as _prof:
             with torch.no_grad():
                 _kw = {}
                 if attention_mask is not None:
@@ -310,21 +312,19 @@ def run_pytorch_mode():
                 model(prompt_ids, **_kw)
                 torch.cuda.synchronize()
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
-        for _ev in _prof.events():
-            _candidates = getattr(_ev, "kernels", None) or [_ev]
-            for _ce in _candidates:
-                _n = _ce.name.lower()
-                _d = getattr(_ce, "self_device_time_total", getattr(_ce, "self_cuda_time_total", getattr(_ce, "cuda_time", 0)))
-                if not _d:
-                    continue
-                if any(k in _n for k in ("nccl","allreduce","allgather")):
-                    _t["communication"] += _d
-                elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
-                    _t["data_movement"] += _d
-                elif any(k in _n for k in ("cublas","gemm","matmul","bmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
-                    _t["compute_bound"] += _d
-                else:
-                    _t["memory_bound"] += _d
+        for _ev in _prof.key_averages():
+            _n = _ev.key.lower()
+            _d = getattr(_ev, "device_time_total", getattr(_ev, "cuda_time_total", 0))
+            if not _d:
+                continue
+            if any(k in _n for k in ("nccl","allreduce","allgather")):
+                _t["communication"] += _d
+            elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
+                _t["data_movement"] += _d
+            elif any(k in _n for k in ("cublas","gemm","matmul","bmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
+                _t["compute_bound"] += _d
+            else:
+                _t["memory_bound"] += _d
         _s = sum(_t.values()) or 1
         for _k in _t:
             _t[_k] /= _s
@@ -378,7 +378,9 @@ def run_pytorch_mode():
 
     # ---- Decode kernel classification (outside measurement) ----
     if HARDWARE_PROFILING and profiler.available:
-        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as _prof:
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
+        ) as _prof:
             with torch.no_grad():
                 _kw = {}
                 if attention_mask is not None:
@@ -386,21 +388,19 @@ def run_pytorch_mode():
                 model(decode_token, **_kw)
                 torch.cuda.synchronize()
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
-        for _ev in _prof.events():
-            _candidates = getattr(_ev, "kernels", None) or [_ev]
-            for _ce in _candidates:
-                _n = _ce.name.lower()
-                _d = getattr(_ce, "self_device_time_total", getattr(_ce, "self_cuda_time_total", getattr(_ce, "cuda_time", 0)))
-                if not _d:
-                    continue
-                if any(k in _n for k in ("nccl","allreduce","allgather")):
-                    _t["communication"] += _d
-                elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
-                    _t["data_movement"] += _d
-                elif any(k in _n for k in ("cublas","gemm","matmul","bmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
-                    _t["compute_bound"] += _d
-                else:
-                    _t["memory_bound"] += _d
+        for _ev in _prof.key_averages():
+            _n = _ev.key.lower()
+            _d = getattr(_ev, "device_time_total", getattr(_ev, "cuda_time_total", 0))
+            if not _d:
+                continue
+            if any(k in _n for k in ("nccl","allreduce","allgather")):
+                _t["communication"] += _d
+            elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
+                _t["data_movement"] += _d
+            elif any(k in _n for k in ("cublas","gemm","matmul","bmm","attention","flash","softmax","norm","silu","gelu","relu","sigmoid","tanh")):
+                _t["compute_bound"] += _d
+            else:
+                _t["memory_bound"] += _d
         _s = sum(_t.values()) or 1
         for _k in _t:
             _t[_k] /= _s
