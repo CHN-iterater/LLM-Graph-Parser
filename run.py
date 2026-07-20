@@ -302,6 +302,13 @@ def run_pytorch_mode():
 
     # ---- Kernel classification profiling (outside measurement) ----
     if HARDWARE_PROFILING and profiler.available:
+        # Warmup forward (CUDA graph warmup, discarded)
+        with torch.no_grad():
+            _wkw = {}
+            if attention_mask is not None:
+                _wkw["attention_mask"] = attention_mask
+            model(prompt_ids, **_wkw)
+            torch.cuda.synchronize()
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
         ) as _prof:
@@ -314,7 +321,12 @@ def run_pytorch_mode():
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
         for _ev in _prof.key_averages():
             _n = _ev.key.lower()
-            _d = getattr(_ev, "device_time_total", getattr(_ev, "cuda_time_total", 0))
+            _d = 0
+            for _attr in ("device_time_total", "cuda_time_total", "self_device_time_total", "self_cuda_time_total", "device_time", "cuda_time"):
+                _v = getattr(_ev, _attr, None)
+                if _v is not None and isinstance(_v, (int, float)) and _v > 0:
+                    _d = _v
+                    break
             if not _d:
                 continue
             if any(k in _n for k in ("nccl","allreduce","allgather")):
@@ -378,6 +390,13 @@ def run_pytorch_mode():
 
     # ---- Decode kernel classification (outside measurement) ----
     if HARDWARE_PROFILING and profiler.available:
+        # Warmup forward (discarded)
+        with torch.no_grad():
+            _wkw = {}
+            if attention_mask is not None:
+                _wkw["attention_mask"] = attention_mask[:, -1:]
+            model(decode_token, **_wkw)
+            torch.cuda.synchronize()
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CUDA, torch.profiler.ProfilerActivity.CPU]
         ) as _prof:
@@ -390,7 +409,12 @@ def run_pytorch_mode():
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
         for _ev in _prof.key_averages():
             _n = _ev.key.lower()
-            _d = getattr(_ev, "device_time_total", getattr(_ev, "cuda_time_total", 0))
+            _d = 0
+            for _attr in ("device_time_total", "cuda_time_total", "self_device_time_total", "self_cuda_time_total", "device_time", "cuda_time"):
+                _v = getattr(_ev, _attr, None)
+                if _v is not None and isinstance(_v, (int, float)) and _v > 0:
+                    _d = _v
+                    break
             if not _d:
                 continue
             if any(k in _n for k in ("nccl","allreduce","allgather")):

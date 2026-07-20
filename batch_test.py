@@ -183,10 +183,11 @@ def main():
             except Exception:
                 pass
 
-        # Step 5: graph_operator_extractor.py（不显示详细输出）
-        run_cmd(
-            [sys.executable, "graph_operator_extractor.py", "-g", str(graph_path)],
-            f"{model_name}: graph_operator_extractor", capture=True)
+        # Step 5: graph_operator_extractor.py（静默执行）
+        import subprocess as _sp
+        _sp.run([sys.executable, "graph_operator_extractor.py", "-g", str(graph_path)],
+                cwd=BASE_DIR, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        print(f"  [{model_name}: graph_operator_extractor] OK")
 
         status = "OK"
         if pf1 is None:
