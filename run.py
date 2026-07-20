@@ -342,7 +342,7 @@ def run_pytorch_mode():
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
         for _ev in _prof.events():
             _n = _ev.name.lower()
-            _d = _ev.duration_us
+            _d = getattr(_ev, "self_cuda_time_total", getattr(_ev, "cuda_time", 0)) or 0
             if any(k in _n for k in ("nccl","allreduce","allgather")):
                 _t["communication"] += _d
             elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
@@ -414,7 +414,7 @@ def run_pytorch_mode():
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
         for _ev in _prof.events():
             _n = _ev.name.lower()
-            _d = _ev.duration_us
+            _d = getattr(_ev, "self_cuda_time_total", getattr(_ev, "cuda_time", 0)) or 0
             if any(k in _n for k in ("nccl","allreduce","allgather")):
                 _t["communication"] += _d
             elif any(k in _n for k in ("memcpy","memset","transpose","reshape","view")):
