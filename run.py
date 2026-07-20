@@ -466,7 +466,7 @@ def run_pytorch_mode():
 
         # 逐位置生成 + 测量：每个位置重复 GEN_REPEATS 次 forward（KV cache 不变态）
         input_ids = prompt_ids.clone()
-        model_kwargs_gen = {"use_cache": True}
+        model_kwargs_gen = {"use_cache": False}
         if attention_mask is not None:
             model_kwargs_gen["attention_mask"] = attention_mask.clone()
         token_data = []
@@ -496,7 +496,9 @@ def run_pytorch_mode():
                 )
                 logits = outputs.logits[:, -1, :].float()
                 scores = logits_processor(input_ids, logits)
-                next_token = torch.argmax(scores[:, :model.config.vocab_size], dim=-1, keepdim=True)
+                next_token = torch.argmax(scores, dim=-1, keepdim=True)
+                vocab_size = getattr(model.config, "vocab_size", scores.shape[-1])
+                next_token = torch.clamp(next_token, 0, vocab_size - 1)
                 input_ids = torch.cat([input_ids, next_token], dim=-1)
 
                 generated_ids.append(next_token[0, 0].item())
