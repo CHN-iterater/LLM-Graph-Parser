@@ -5,6 +5,7 @@ from pathlib import Path
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from llm_graph_parser import parse_model, parse_onnx
 from llm_graph_parser.hardware import HardwareProfiler
