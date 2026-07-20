@@ -436,7 +436,7 @@ def run_pytorch_mode():
                 _tf.write(f"prefill_kernel_ratio_data_movement {_t['data_movement']:.4f}\n")
                 _tf.write(f"prefill_kernel_ratio_communication {_t['communication']:.4f}\n")
             print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
-        _write_kernel_report(_prof, output_dir, "prefill")
+            _write_kernel_report(_prof, output_dir, "prefill")
         except Exception:
             print("    kernel profile: skipped")
 
@@ -543,7 +543,7 @@ def run_pytorch_mode():
                 _tf.write(f"decode_kernel_ratio_data_movement {_t['data_movement']:.4f}\n")
                 _tf.write(f"decode_kernel_ratio_communication {_t['communication']:.4f}\n")
             print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
-        _write_kernel_report(_prof, output_dir, "decode")
+            _write_kernel_report(_prof, output_dir, "decode")
         except Exception:
             print("    kernel profile: skipped")
 
