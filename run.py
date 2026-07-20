@@ -319,7 +319,13 @@ def run_pytorch_mode():
                 model(prompt_ids, **_kw)
                 torch.cuda.synchronize()
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
-        for _ev in _prof.key_averages():
+        _ka = _prof.key_averages()
+        if _ka:
+            _dbg = _ka[0]
+            print(f"    [profile debug] events={len(_ka)} first={_dbg.key} "
+                  f"d_tot={getattr(_dbg,'device_time_total',0)} "
+                  f"c_tot={getattr(_dbg,'cuda_time_total',0)}")
+        for _ev in _ka:
             _n = _ev.key.lower()
             _d = 0
             for _attr in ("device_time_total", "cuda_time_total", "self_device_time_total", "self_cuda_time_total", "device_time", "cuda_time"):
@@ -407,7 +413,13 @@ def run_pytorch_mode():
                 model(decode_token, **_kw)
                 torch.cuda.synchronize()
         _t = {"compute_bound": 0.0, "memory_bound": 0.0, "data_movement": 0.0, "communication": 0.0}
-        for _ev in _prof.key_averages():
+        _ka = _prof.key_averages()
+        if _ka:
+            _dbg = _ka[0]
+            print(f"    [profile debug] events={len(_ka)} first={_dbg.key} "
+                  f"d_tot={getattr(_dbg,'device_time_total',0)} "
+                  f"c_tot={getattr(_dbg,'cuda_time_total',0)}")
+        for _ev in _ka:
             _n = _ev.key.lower()
             _d = 0
             for _attr in ("device_time_total", "cuda_time_total", "self_device_time_total", "self_cuda_time_total", "device_time", "cuda_time"):
