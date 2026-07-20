@@ -406,6 +406,7 @@ def run_pytorch_mode():
                 _res = _sp.run([sys.executable, _prof_script, MODEL_SOURCE, PROMPT, _ph],
                                capture_output=True, text=True, timeout=120)
                 if _res.returncode != 0:
+                    print(f"    [debug] subprocess {_ph} failed rc={_res.returncode} stderr={_res.stderr.strip()[-200:]}")
                     continue
                 _dat = _js.loads(_res.stdout.strip().splitlines()[-1])
                 with open(ts_path, "a") as _tf:
