@@ -67,6 +67,7 @@ def main():
     p.add_argument("--runs", type=int, default=PROFILING_RUNS)
     p.add_argument("--gen-len", type=int, default=GEN_LEN)
     p.add_argument("--no-hardware", action="store_true", help="禁用 hardware profiling")
+    p.add_argument("--gen-repeats", type=int, default=None, help="生成阶段每步重复次数")
     args = p.parse_args()
 
     models = args.models or DEFAULT_MODELS
@@ -118,6 +119,7 @@ def main():
              "--gen-len", str(args.gen_len)],
             f"{model_name}: power_analyze", capture=True)
         pf2 = dc2 = None
+        pf2cats = dc2cats = None
         if ok:
             import re
             for line in pa_out.split("\n"):
@@ -127,6 +129,25 @@ def main():
                 m = re.search(r"Decode.*?(\d+\.\d+)J", line)
                 if m:
                     dc2 = float(m.group(1))
+            _cur = None
+            for line in pa_out.split("\n"):
+                ls = line.strip()
+                if ls.startswith("Prefill"):
+                    _cur = "pf"
+                elif ls.startswith("Decode"):
+                    _cur = "dc"
+                elif "compute=" in ls and _cur:
+                    _d = {}
+                    _cmap = {"compute": "compute_bound", "memory": "memory_bound", "move": "data_movement"}
+                    for _kv in ls.split():
+                        if "=" in _kv:
+                            k, v = _kv.split("=", 1)
+                            _d[_cmap.get(k, k)] = float(v.replace("J", ""))
+                    if _cur == "pf":
+                        pf2cats = _d
+                    else:
+                        dc2cats = _d
+                    _cur = None
         else:
             results.append((model_name, "FAILED at power_analyze"))
             continue
@@ -147,15 +168,29 @@ def main():
                 if "--- Decode" in ls:
                     dc1 = _parse_energy(ec_lines, i)
 
-        # Step 4: graph_operator_extractor.py（可选，失败不阻塞）
+        # Direction 1 categories
+        pf1cats = dc1cats = None
+        if graph_path.exists():
+            try:
+                from energy_consumption_refactor import estimate_by_category
+                import json
+                with open(graph_path) as _fg:
+                    _gdata = json.load(_fg)
+                _gnodes = _gdata.get("nodes", [])
+                pf1cats = estimate_by_category(_gnodes, stage="prefill")
+                dc1cats = estimate_by_category(_gnodes, stage="decode")
+            except Exception:
+                pass
+
+        # Step 4: graph_operator_extractor.py（静默执行）
         run_cmd(
             [sys.executable, "graph_operator_extractor.py", "-g", str(graph_path)],
-            f"{model_name}: graph_operator_extractor")
+            f"{model_name}: graph_operator_extractor", capture=True)
 
         status = "OK"
         if pf1 is None:
             status = "D2 OK (D1 N/A)"
-        energy_summary[model_name] = (pf1, pf2, dc1, dc2)
+        energy_summary[model_name] = (pf1, pf2, dc1, dc2, pf1cats, dc1cats, pf2cats, dc2cats)
         results.append((model_name, status))
 
         # 冷却等待（让 GPU 降温后再测下一个模型）
@@ -174,15 +209,60 @@ def main():
 
     # 能耗汇总表
     if energy_summary:
-        print(f"  {'Model':28s} {'Prefill(Dir1)':>13s} {'Prefill(Dir2)':>13s} {'Decode(Dir1)':>13s} {'Decode(Dir2)':>13s}")
-        print(f"  {'-' * 28} {'-' * 13} {'-' * 13} {'-' * 13} {'-' * 13}")
-        for name, (pf1, pf2, dc1, dc2) in sorted(energy_summary.items()):
-            a = f"{pf1:.2f}J" if pf1 is not None else "N/A"
-            b = f"{pf2:.2f}J" if pf2 is not None else "N/A"
-            c = f"{dc1:.2f}J" if dc1 is not None else "N/A"
-            d = f"{dc2:.2f}J" if dc2 is not None else "N/A"
-            print(f"  {name:28s} {a:>13s} {b:>13s} {c:>13s} {d:>13s}")
+        _cats = ["compute_bound", "memory_bound", "data_movement", "communication"]
+        hdr = f"  {'Model':22s}"
+        for _ph in ("PF", "DC"):
+            for _d in ("D1", "D2"):
+                hdr += f" {_ph}_{_d}_Tot"
+                for _c in ("Cmp", "Mem", "Mov", "Com"):
+                    hdr += f" {_ph}_{_d}_{_c:>3s}"
+        print(hdr)
+        print(f"  {'-' * 22} {'-' * (len(hdr)-26)}")
+        for name, (pf1, pf2, dc1, dc2, pf1c, dc1c, pf2c, dc2c) in sorted(energy_summary.items()):
+            def _fv(v):
+                return f"{v*1000:.1f}" if v is not None else "N/A"
+            def _fc(d):
+                return tuple(f"{d.get(c,0)*1000:.1f}" if d else "N/A" for c in _cats)
+            row = f"  {name:22s}"
+            for _te, _tc in [(pf1, pf1c), (pf2, pf2c), (dc1, dc1c), (dc2, dc2c)]:
+                row += f" {_fv(_te):>7s}"
+                for _v in _fc(_tc):
+                    row += f" {_v:>6s}"
+            print(row)
         print()
+
+    # ---- Save results to CSV ----
+    if energy_summary:
+        _out_csv = OUTPUT_DIR / f"batch_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        _metrics = [
+            ("Total Energy", None, None),
+            ("Compute", None, "compute_bound"),
+            ("Memory", None, "memory_bound"),
+            ("Data Movement", None, "data_movement"),
+            ("Communication", None, "communication"),
+        ]
+        with open(_out_csv, "w", newline="", encoding="utf-8-sig") as _f:
+            _w = csv.writer(_f)
+            for _mname, _, _cat in _metrics:
+                _w.writerow([_mname, "", "", "", "", "", ""])
+                _w.writerow(["Model", "Prefill_D1(J)", "Prefill_D2(J)", "Prefill_Err%", "Decode_D1(J)", "Decode_D2(J)", "Decode_Err%"])
+                for _md_name, (pf1, pf2, dc1, dc2, pf1c, dc1c, pf2c, dc2c) in sorted(energy_summary.items()):
+                    def _ge(d, k):
+                        return d.get(k, 0) if d else 0
+                    def _err(v1, v2):
+                        if v2 and v2 != 0:
+                            return f"{(v1/v2-1)*100:.1f}"
+                        return "N/A"
+                    if _cat is None:
+                        _p1, _p2, _d1, _d2 = pf1 or 0, pf2 or 0, dc1 or 0, dc2 or 0
+                    else:
+                        _p1 = _ge(pf1c, _cat)
+                        _p2 = _ge(pf2c, _cat)
+                        _d1 = _ge(dc1c, _cat)
+                        _d2 = _ge(dc2c, _cat)
+                    _w.writerow([_md_name, f"{_p1:.4f}", f"{_p2:.4f}", _err(_p1, _p2), f"{_d1:.4f}", f"{_d2:.4f}", _err(_d1, _d2)])
+                _w.writerow([])
+        print(f"  Results saved to: {_out_csv}")
 
     print(f"  {'Model':30s}  {'Status':>20s}")
     print(f"  {'-' * 52}")
