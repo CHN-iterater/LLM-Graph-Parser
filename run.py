@@ -239,6 +239,10 @@ def run_pytorch_mode():
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(MODEL_SOURCE, trust_remote_code=TRUST_REMOTE_CODE, local_files_only=False)
     model.eval()
+    _vs = getattr(model.config, "vocab_size", 0)
+    if _vs and _vs > 0 and len(tokenizer) > _vs:
+        model.resize_token_embeddings(len(tokenizer))
+        print(f"  [config] resized embeddings to {len(tokenizer)}")
     print(f"  参数总量: {sum(p.numel() for p in model.parameters()):,}")
 
     # 关闭 KV cache，保证每次 forward 都是完整前向（与方向 1 对齐）

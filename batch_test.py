@@ -183,9 +183,9 @@ def main():
                 pass
 
         # Step 4: graph_operator_extractor.py（静默执行）
-        run_cmd(
-            [sys.executable, "graph_operator_extractor.py", "-g", str(graph_path)],
-            f"{model_name}: graph_operator_extractor", capture=True)
+        import subprocess as _sp
+        _sp.run([sys.executable, "graph_operator_extractor.py", "-g", str(graph_path)],
+                cwd=BASE_DIR, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
 
         status = "OK"
         if pf1 is None:
