@@ -66,6 +66,11 @@ def load_timestamps(path):
                         "idle_cuda_start_energy_j", "idle_cuda_end_energy_j"):
                 if line.startswith(tag):
                     ts[tag] = float(line.strip().split()[1])
+            for tag in ("prefill_kernel_ratio", "decode_kernel_ratio"):
+                if line.startswith(tag):
+                    parts = line.strip().split()
+                    if len(parts) == 2:
+                        ts[parts[0]] = float(parts[1])
     return ts
 
 
@@ -141,7 +146,17 @@ def main():
         if name == "Decode":
             pass  # 单 token 前向，不除以 gen_len
 
-        results.append((name, wall_s, e_j, avg_power))
+        _prefix = {"Prefill": "prefill", "Decode": "decode"}[name]
+        _r_c = ts.get(f"{_prefix}_kernel_ratio_compute", 0.0)
+        _r_m = ts.get(f"{_prefix}_kernel_ratio_memory", 0.0)
+        _r_d = ts.get(f"{_prefix}_kernel_ratio_data_movement", 0.0)
+        _r_co = ts.get(f"{_prefix}_kernel_ratio_communication", 0.0)
+        _r_sum = _r_c + _r_m + _r_d + _r_co
+        cat_results = {}
+        if _r_sum > 0:
+            cat_results = {"compute_bound": e_j * _r_c / _r_sum, "memory_bound": e_j * _r_m / _r_sum,
+                           "data_movement": e_j * _r_d / _r_sum, "communication": e_j * _r_co / _r_sum}
+        results.append((name, wall_s, e_j, avg_power, cat_results))
 
         # 调试信息
         e_total_display = e_j_all if energy_tag_s in ts and energy_tag_e in ts else e_j_dynamic
@@ -171,9 +186,14 @@ def main():
     print(f"\n  (除以 {runs} 次 profiling runs，以下为单次推理结果)")
     print(f"  {'Phase':15s}  {'Duration':>10s}  {'Energy':>10s}  {'Avg Power':>10s}")
     print(f"  {'-' * 50}")
-    for name, d, e, w in results:
-        label = name
-        print(f"  {label:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
+    for r in results:
+        name, d, e, w = r[0], r[1], r[2], r[3]
+        print(f"  {name:15s}  {d:>8.3f}s  {e:>8.2f}J  {w:>8.2f}W")
+        if len(r) >= 5 and r[4]:
+            _cv = r[4]
+            print(f"  {'':15s}  compute={_cv.get('compute_bound',0):.4f}J  "
+                  f"memory={_cv.get('memory_bound',0):.4f}J  "
+                  f"move={_cv.get('data_movement',0):.4f}J")
 
     if idle_before > 0 or idle_after > 0:
         print(f"\n  [参考] idle_before={idle_before:.1f}W  idle_after={idle_after:.1f}W")
