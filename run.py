@@ -216,6 +216,58 @@ def _summary_extra(graph, combined, decode_graph, gen_len, pf_ai, profiler=None)
 def _ts():
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
+
+def _write_kernel_report(prof, output_dir, label):
+    from collections import defaultdict
+    _op_map = {
+        "aten::mm": "GEMM", "aten::linear": "LINEAR", "aten::addmm": "GEMM",
+        "aten::bmm": "BMM", "aten::matmul": "GEMM",
+        "aten::softmax": "SOFTMAX", "aten::_softmax": "SOFTMAX",
+        "aten::layer_norm": "LAYER_NORM", "aten::native_layer_norm": "LAYER_NORM",
+        "aten::gelu": "GELU", "aten::silu": "SiLU", "aten::relu": "RELU",
+        "aten::tanh": "TANH", "aten::sigmoid": "SIGMOID",
+        "aten::embedding": "EMBEDDING",
+        "aten::copy_": "COPY", "aten::to": "CAST",
+        "aten::cat": "CAT", "aten::slice": "SLICE",
+        "aten::transpose": "TRANSPOSE", "aten::t": "TRANSPOSE",
+        "aten::permute": "TRANSPOSE", "aten::reshape": "RESHAPE",
+        "aten::view": "RESHAPE", "aten::expand": "EXPAND",
+        "aten::unsqueeze": "RESHAPE", "aten::squeeze": "RESHAPE",
+        "aten::add": "ADD", "aten::mul": "MUL", "aten::div": "DIV",
+        "aten::sub": "ADD", "aten::pow": "POW",
+        "aten::sqrt": "SQRT", "aten::neg": "NEG",
+        "aten::sum": "REDUCESUM", "aten::mean": "REDUCEMEAN",
+        "aten::where": "WHERE", "aten::isnan": "ISNAN",
+        "aten::dropout": "DROPOUT", "aten::clamp": "CLAMP",
+        "aten::clone": "CLONE",
+    }
+    data = defaultdict(lambda: defaultdict(float))
+    for ev in prof.key_averages():
+        onnx = _op_map.get(ev.key, ev.key.replace("aten::", "").split(".")[0].upper())
+        d = 0
+        for _a in ("device_time_total", "cuda_time_total", "device_time", "cuda_time"):
+            _v = getattr(ev, _a, None)
+            if _v is not None and isinstance(_v, (int, float)) and _v > 0:
+                d = _v
+                break
+        if not d:
+            continue
+        data[onnx][ev.key] += d
+    if not data:
+        return
+    _path = os.path.join(output_dir, f"{label}_kernel_report.txt")
+    with open(_path, "w", encoding="utf-8") as f:
+        f.write(f"# Kernel breakdown: {label}\n")
+        f.write(f"{'Op':20s} {'Total(us)':>10s}  {'Top CUDA Kernels':55s}\n")
+        f.write("-" * 85 + "\n")
+        for op in sorted(data, key=lambda x: sum(data[x].values()), reverse=True):
+            total = sum(data[op].values())
+            kerns = ", ".join(f"{n.split(':')[-1][:25]}:{t:.0f}"
+                              for n, t in sorted(data[op].items(), key=lambda x: -x[1])[:5])
+            f.write(f"{op:20s} {total:>8.0f}   {kerns:55s}\n")
+    print(f"    kernel report -> {_path}")
+
+
 def run_pytorch_mode():
     from transformers import AutoModelForCausalLM, AutoTokenizer
     import torch
@@ -384,6 +436,7 @@ def run_pytorch_mode():
                 _tf.write(f"prefill_kernel_ratio_data_movement {_t['data_movement']:.4f}\n")
                 _tf.write(f"prefill_kernel_ratio_communication {_t['communication']:.4f}\n")
             print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
+        _write_kernel_report(_prof, output_dir, "prefill")
         except Exception:
             print("    kernel profile: skipped")
 
@@ -490,6 +543,7 @@ def run_pytorch_mode():
                 _tf.write(f"decode_kernel_ratio_data_movement {_t['data_movement']:.4f}\n")
                 _tf.write(f"decode_kernel_ratio_communication {_t['communication']:.4f}\n")
             print(f"    kernel profile: compute={_t['compute_bound']*100:.0f}% memory={_t['memory_bound']*100:.0f}% move={_t['data_movement']*100:.0f}%")
+        _write_kernel_report(_prof, output_dir, "decode")
         except Exception:
             print("    kernel profile: skipped")
 
