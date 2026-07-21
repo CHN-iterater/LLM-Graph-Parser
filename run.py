@@ -413,7 +413,7 @@ def run_pytorch_mode():
                 elif "idle_before_end_energy_j" in line:
                     ib_end_e = float(line.strip().split()[1])
             if ib_start_e is not None and ib_end_e is not None:
-                P_bl = (ib_end_e - ib_start_e) / 2.0
+                P_bl = (ib_end_e - ib_start_e) / 10.0
 
         from transformers.generation import LogitsProcessorList, StoppingCriteriaList
         import copy
@@ -681,6 +681,7 @@ if __name__ == "__main__":
         MODEL_SOURCE = _a.model
         if not MODEL_SOURCE.startswith("/") and not MODEL_SOURCE.startswith("..") and not MODEL_SOURCE.startswith("."):
             MODEL_SOURCE = f"../Models/{MODEL_SOURCE}"
+        MODEL_SOURCE = os.path.abspath(MODEL_SOURCE)
     if _a.prompt is not None:
         PROMPT = _a.prompt
     if _a.max_new_tokens is not None:
