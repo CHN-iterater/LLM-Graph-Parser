@@ -265,68 +265,6 @@ def estimate_with_fusion(nodes, stage=None):
     return dict(result), total, len(skip)
 
 
-def estimate_with_fusion(nodes, stage=None):
-    """考虑算子融合的能耗估算。
-    融合规则：
-    1. GEMM/LINEAR/BMM → ADD/MUL/GELU/SiLU/RELU 等归零（cuBLAS 融合 kernel）
-    2. LayerNorm 链 (REDUCEMEAN→SUB→POW→SQRT→DIV→MUL→ADD) 只计首节点
-    """
-    from collections import defaultdict
-    _FUSABLE = {"ADD", "MUL", "SUB", "GELU", "SILU", "RELU", "SIGMOID", "TANH", "NEG"}
-    _COMPUTE = {"GEMM", "LINEAR", "BMM"}
-    _LN_OPS = ["SUB", "POW", "SQRT", "DIV", "MUL", "ADD"]
-
-    node_map = {}
-    for n in nodes:
-        node_map[n.get("op_id", "")] = n
-
-    skip_ids = set()
-
-    # 规则 1：计算后融合
-    for n in nodes:
-        if n.get("op_type") not in _COMPUTE:
-            continue
-        for cid in n.get("children", []):
-            c = node_map.get(cid)
-            if c and c.get("op_type") in _FUSABLE:
-                skip_ids.add(cid)
-
-    # 规则 2：LayerNorm 链
-    for i, n in enumerate(nodes):
-        if n.get("op_type") != "REDUCEMEAN":
-            continue
-        chain = [n]
-        cur = n
-        for exp in _LN_OPS:
-            found = None
-            for cid in cur.get("children", []):
-                c = node_map.get(cid)
-                if c and c.get("op_type") == exp:
-                    found = c
-                    break
-            if found is None:
-                chain = None
-                break
-            chain.append(found)
-            cur = found
-        if chain and len(chain) == 7:
-            for cn in chain[1:]:
-                skip_ids.add(cn.get("op_id", ""))
-
-    result = defaultdict(float)
-    total = 0.0
-    for n in nodes:
-        if stage and n.get("stage") != stage:
-            continue
-        if n.get("op_id", "") in skip_ids:
-            continue
-        e = estimate(n)
-        op = n.get("op_type", "UNKNOWN")
-        result[ONNX_CAT.get(op, "memory_bound")] += e
-        total += e
-    return dict(result), total, len(skip_ids)
-
-
 def energy_j(N, M, K, formula_key):
     f = _FORMULAS[formula_key]
     t_type = f[0]
@@ -409,6 +347,8 @@ def main():
     p.add_argument("-o", "--output", default="", help="输出路径（默认与 graph.json 同目录）")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("--gen-len", type=int, default=1)
+    p.add_argument("--fusion", action="store_true", help="启用融合感知，识别 GPU kernel 融合后折扣能耗")
+    p.add_argument("-c", "--csv", default="", help="Qwen_result.csv 路径，启用 CSV 查表替代公式")
     args = p.parse_args()
 
     nodes, summary = load_graph(args.graph)
