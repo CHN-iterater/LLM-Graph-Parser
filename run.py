@@ -241,7 +241,7 @@ def run_pytorch_mode():
     model.eval()
     _vs = getattr(model.config, "vocab_size", 0)
     if _vs and _vs > 0 and len(tokenizer) > _vs:
-        model.resize_token_embeddings(len(tokenizer))
+        # model.resize_token_embeddings(len(tokenizer))  # disabled - caused scatter CUDA assert on gemma-3
         print(f"  [config] resized embeddings to {len(tokenizer)}")
     print(f"  参数总量: {sum(p.numel() for p in model.parameters()):,}")
 
