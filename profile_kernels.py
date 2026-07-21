@@ -21,6 +21,8 @@ if tokenizer.pad_token is None:
 inputs = tokenizer(prompt, return_tensors="pt")
 input_ids = inputs["input_ids"].cuda()
 attn_mask = inputs.get("attention_mask")
+if attn_mask is not None:
+    attn_mask = attn_mask.cuda()
 
 if phase == "decode":
     input_ids = input_ids[:, -1:]
