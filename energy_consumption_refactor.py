@@ -375,6 +375,17 @@ def estimate(node):
     ins = node.get("input_tensors", [])
     outs = node.get("output_tensors", [])
 
+    # CSV 查表优先
+    if _TABLE:
+        iN, iM, iK = extract_mnk_ins(ins, t)
+        oN, oM, oK = extract_mnk_outs(outs)
+        key = (t, iN, iM, iK, oN, oM, oK)
+        if key in _TABLE:
+            return _TABLE[key]
+        key0 = (t, iN, iM, 0, oN, oM, 0)
+        if key0 in _TABLE:
+            return _TABLE[key0]
+
     key = FORMULA_NAME.get(t)
     if key is None or key not in _FORMULAS:
         key = "UNKNOWN"
@@ -407,8 +418,24 @@ def main():
         print(f"[energy] {args.graph}: empty")
         return
 
+    # Load CSV lookup table if provided
+    import csv as _csv
+    _TABLE = {}
+    if args.csv:
+        with open(args.csv, encoding="utf-8-sig") as _f:
+            for _row in _csv.DictReader(_f):
+                _vals = list(_row.values())
+                _key = (_row['operator'].strip(),
+                       int(_row['input_N']), int(_row['input_M']), int(_row['input_K']),
+                       int(_row['output_N']), int(_row['output_M']), int(_row['output_K']))
+                _TABLE[_key] = float(_vals[-1]) / 1000  # mJ -> J
+
     pf_nodes = [n for n in nodes if n.get("stage") == "prefill"]
     dc_nodes = [n for n in nodes if n.get("stage") == "decode"]
+
+    # 设置 CSV 查表（影响 estimate() 和 estimate_with_fusion() 的全局行为）
+    import energy_consumption_refactor as _ecr_mod
+    _ecr_mod._TABLE = _TABLE
 
     def stage_report(sn):
         op_energy = defaultdict(float)
