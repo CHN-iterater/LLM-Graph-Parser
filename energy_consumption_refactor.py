@@ -109,6 +109,8 @@ _FORMULAS = {
     "UNKNOWN":    ("N*M", 0, 0.005,                     "const", 50.0),
 }
 
+_TABLE: dict = {}
+
 # ONNX op_type → formula name
 FORMULA_NAME = {
     "LINEAR": "GEMM", "GEMM": "GEMM", "BMM": "BMM",
@@ -360,7 +362,7 @@ def main():
 
     # Load CSV lookup table if provided
     import csv as _csv
-    _TABLE = {}
+
     if args.csv:
         with open(args.csv, encoding="utf-8-sig") as _f:
             for _row in _csv.DictReader(_f):
