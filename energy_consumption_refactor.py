@@ -155,6 +155,178 @@ def estimate_by_category(nodes, stage=None):
     return dict(result)
 
 
+# Fusion-aware estimation: operators fused by GPU kernel should not be double-counted
+_VIEW_OPS = {"RESHAPE", "VIEW", "SLICE", "EXPAND"}
+_FUSABLE_ACT = {"ADD", "MUL", "GELU", "SILU", "RELU", "SIGMOID", "TANH", "NEG", "SUB"}
+
+def _build_idx(nodes):
+    idx = {}
+    for n in nodes:
+        idx[n.get("op_id", "")] = n
+    return idx
+
+def _match_chain(node, expected, idx, skip):
+    chain = [node]
+    cur = node
+    for exp in expected:
+        found = None
+        for cid in cur.get("children", []):
+            c = idx.get(cid)
+            if c and c.get("op_type") == exp and cid not in skip:
+                found = c
+                break
+        if found is None:
+            return None
+        chain.append(found)
+        cur = found
+    return chain
+
+def estimate_with_fusion(nodes, stage=None):
+    from collections import defaultdict
+    idx = _build_idx(nodes)
+    skip = set()
+
+    LN_CHAIN = ["SUB", "POW", "SQRT", "DIV", "MUL", "ADD"]
+    RMS_CHAIN = ["REDUCEMEAN", "ADD", "SQRT", "DIV", "MUL"]
+    ATTN_MID = ["SOFTMAX", "ISNAN", "WHERE"]
+
+    # Rule 1: view ops
+    for n in nodes:
+        if n.get("op_type") in _VIEW_OPS:
+            skip.add(n.get("op_id", ""))
+
+    # Rule 2: GEMM -> elementwise fusion
+    for n in nodes:
+        if n.get("op_type") not in {"GEMM", "LINEAR", "BMM"}:
+            continue
+        for cid in n.get("children", []):
+            c = idx.get(cid)
+            if not c or c.get("op_type") not in _FUSABLE_ACT:
+                continue
+            parents = [p for p in c.get("parents", []) if p in idx]
+            if len(parents) <= 1:
+                skip.add(cid)
+
+    # Rule 3: LayerNorm chain
+    for n in nodes:
+        if n.get("op_type") == "REDUCEMEAN" and n.get("op_id", "") not in skip:
+            chain = _match_chain(n, LN_CHAIN, idx, skip)
+            if chain and len(chain) == 7:
+                for cn in chain[1:]:
+                    skip.add(cn.get("op_id", ""))
+
+    # Rule 4: RMSNorm chain
+    for n in nodes:
+        if n.get("op_type") == "POW" and n.get("op_id", "") not in skip:
+            chain = _match_chain(n, RMS_CHAIN, idx, skip)
+            if chain and len(chain) == 6:
+                for cn in chain[1:]:
+                    skip.add(cn.get("op_id", ""))
+
+    # Rule 5: Attention chain
+    for n in nodes:
+        if n.get("op_type") not in {"BMM", "GEMM"} or n.get("op_id", "") in skip:
+            continue
+        if not any(c.get("op_type") == "SOFTMAX" for c in [idx.get(cid) for cid in n.get("children", [])] if c):
+            continue
+        chain = _match_chain(n, ATTN_MID, idx, skip)
+        if chain and len(chain) == 4:
+            last = chain[-1]
+            for cid in last.get("children", []):
+                c = idx.get(cid)
+                if c and c.get("op_type") in {"BMM", "GEMM"}:
+                    for cn in chain[1:]:
+                        skip.add(cn.get("op_id", ""))
+                    break
+
+    # Rule 6: SwiGLU activation
+    for n in nodes:
+        if n.get("op_type") != "SILU":
+            continue
+        sp = set(n.get("parents", []))
+        for cid in n.get("children", []):
+            c = idx.get(cid)
+            if c and c.get("op_type") == "MUL":
+                mp = set(c.get("parents", []))
+                if sp & mp:
+                    skip.add(n.get("op_id", ""))
+                    skip.add(cid)
+
+    result = defaultdict(float)
+    total = 0.0
+    for n in nodes:
+        if stage and n.get("stage") != stage:
+            continue
+        if n.get("op_id", "") in skip:
+            continue
+        e = estimate(n)
+        result[ONNX_CAT.get(n.get("op_type", "UNKNOWN"), "memory_bound")] += e
+        total += e
+    return dict(result), total, len(skip)
+
+
+def estimate_with_fusion(nodes, stage=None):
+    """考虑算子融合的能耗估算。
+    融合规则：
+    1. GEMM/LINEAR/BMM → ADD/MUL/GELU/SiLU/RELU 等归零（cuBLAS 融合 kernel）
+    2. LayerNorm 链 (REDUCEMEAN→SUB→POW→SQRT→DIV→MUL→ADD) 只计首节点
+    """
+    from collections import defaultdict
+    _FUSABLE = {"ADD", "MUL", "SUB", "GELU", "SILU", "RELU", "SIGMOID", "TANH", "NEG"}
+    _COMPUTE = {"GEMM", "LINEAR", "BMM"}
+    _LN_OPS = ["SUB", "POW", "SQRT", "DIV", "MUL", "ADD"]
+
+    node_map = {}
+    for n in nodes:
+        node_map[n.get("op_id", "")] = n
+
+    skip_ids = set()
+
+    # 规则 1：计算后融合
+    for n in nodes:
+        if n.get("op_type") not in _COMPUTE:
+            continue
+        for cid in n.get("children", []):
+            c = node_map.get(cid)
+            if c and c.get("op_type") in _FUSABLE:
+                skip_ids.add(cid)
+
+    # 规则 2：LayerNorm 链
+    for i, n in enumerate(nodes):
+        if n.get("op_type") != "REDUCEMEAN":
+            continue
+        chain = [n]
+        cur = n
+        for exp in _LN_OPS:
+            found = None
+            for cid in cur.get("children", []):
+                c = node_map.get(cid)
+                if c and c.get("op_type") == exp:
+                    found = c
+                    break
+            if found is None:
+                chain = None
+                break
+            chain.append(found)
+            cur = found
+        if chain and len(chain) == 7:
+            for cn in chain[1:]:
+                skip_ids.add(cn.get("op_id", ""))
+
+    result = defaultdict(float)
+    total = 0.0
+    for n in nodes:
+        if stage and n.get("stage") != stage:
+            continue
+        if n.get("op_id", "") in skip_ids:
+            continue
+        e = estimate(n)
+        op = n.get("op_type", "UNKNOWN")
+        result[ONNX_CAT.get(op, "memory_bound")] += e
+        total += e
+    return dict(result), total, len(skip_ids)
+
+
 def energy_j(N, M, K, formula_key):
     f = _FORMULAS[formula_key]
     t_type = f[0]

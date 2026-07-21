@@ -172,13 +172,13 @@ def main():
         pf1cats = dc1cats = None
         if graph_path.exists():
             try:
-                from energy_consumption_refactor import estimate_by_category
+                from energy_consumption_refactor import estimate_with_fusion
                 import json
                 with open(graph_path) as _fg:
                     _gdata = json.load(_fg)
                 _gnodes = _gdata.get("nodes", [])
-                pf1cats = estimate_by_category(_gnodes, stage="prefill")
-                dc1cats = estimate_by_category(_gnodes, stage="decode")
+                pf1cats, _, _ = estimate_with_fusion(_gnodes, stage="prefill")
+                dc1cats, _, _ = estimate_with_fusion(_gnodes, stage="decode")
             except Exception:
                 pass
 
