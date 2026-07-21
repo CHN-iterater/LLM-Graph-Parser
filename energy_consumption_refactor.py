@@ -176,12 +176,12 @@ def estimate_with_fusion(nodes, stage=None):
     from energy_consumption_refactor import extract_mnk_ins as _emi
     from collections import defaultdict
     idx = _build_idx(nodes)
-    skip = set()
+    skip = {}
     rule_counts = {"view": 0, "gemm_act": 0, "ln": 0, "rms": 0, "attn": 0, "swiglu": 0, "gemm_stack": 0}
     # Rule 1: view ops
     for n in nodes:
         if n.get("op_type") in {"RESHAPE","VIEW","SLICE","EXPAND"}:
-            skip.add(n.get("op_id", ""))
+            skip[n.get("op_id", "")] = 0.0
             rule_counts["view"] += 1
 
 
@@ -199,7 +199,7 @@ def estimate_with_fusion(nodes, stage=None):
                 continue
             parents = [p for p in c.get("parents", []) if p in idx]
             if len(parents) <= 1:
-                skip.add(cid)
+                skip[cid] = 0.1
 
     # Rule 3: LayerNorm chain
     for n in nodes:
@@ -207,7 +207,7 @@ def estimate_with_fusion(nodes, stage=None):
             chain = _match_chain(n, LN_CHAIN, idx, skip)
             if chain and len(chain) == 7:
                 for cn in chain[1:]:
-                    skip.add(cn.get("op_id", ""))
+                    skip[cn.get("op_id", "")] = 0.3
                     rule_counts["ln"] += 1
 
     # Rule 4: RMSNorm chain
@@ -216,7 +216,7 @@ def estimate_with_fusion(nodes, stage=None):
             chain = _match_chain(n, RMS_CHAIN, idx, skip)
             if chain and len(chain) == 8:
                 for cn in chain[1:]:
-                    skip.add(cn.get("op_id", ""))
+                    skip[cn.get("op_id", "")] = 0.3
                     rule_counts["rms"] += 1
 
     # Rule 5: Attention chain
@@ -232,7 +232,7 @@ def estimate_with_fusion(nodes, stage=None):
                 c = idx.get(cid)
                 if c and c.get("op_type") in {"BMM", "GEMM"}:
                     for cn in chain[1:]:
-                        skip.add(cn.get("op_id", ""))
+                        skip[cn.get("op_id", "")] = 0.2
                     break
 
 
@@ -252,7 +252,7 @@ def estimate_with_fusion(nodes, stage=None):
             continue
         total_n = sum(_emi(g.get("input_tensors",[]), 'GEMM')[0] for g in gg)
         for g in gg[:-1]:
-            skip.add(g.get("op_id", ""))
+            skip[g.get("op_id", "")] = 0.0
             rule_counts["gemm_stack"] += 1
         gg[-1]["_fused_gemm_n"] = total_n
 
@@ -261,10 +261,9 @@ def estimate_with_fusion(nodes, stage=None):
     for n in nodes:
         if stage and n.get("stage") != stage:
             continue
-        if n.get("op_id", "") in skip:
-            continue
         nid = n.get("op_id", "")
         fused_n = n.get("_fused_gemm_n", 0)
+        fuse_discount = skip.get(nid, 1.0)
         if fused_n:
             ins = n.get("input_tensors", [])
             t = n.get("op_type", "UNKNOWN")
@@ -286,6 +285,7 @@ def estimate_with_fusion(nodes, stage=None):
                 e = estimate(n)
         else:
             e = estimate(n)
+        e *= fuse_discount
         result[ONNX_CAT.get(n.get("op_type", "UNKNOWN"), "memory_bound")] += e
         total += e
     return dict(result), total, len(skip)
