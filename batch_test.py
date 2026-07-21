@@ -177,8 +177,9 @@ def main():
                 with open(graph_path) as _fg:
                     _gdata = json.load(_fg)
                 _gnodes = _gdata.get("nodes", [])
-                pf1cats, _, _ = estimate_with_fusion(_gnodes, stage="prefill")
-                dc1cats, _, _ = estimate_with_fusion(_gnodes, stage="decode")
+                _gsummary = _gdata.get("summary", {})
+                pf1cats, _, _ = estimate_with_fusion(_gnodes, stage="prefill", summary=_gsummary)
+                dc1cats, _, _ = estimate_with_fusion(_gnodes, stage="decode", summary=_gsummary)
             except Exception:
                 pass
 

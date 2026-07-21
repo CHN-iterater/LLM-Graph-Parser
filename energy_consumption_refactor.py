@@ -84,9 +84,9 @@ _FORMULAS = {
     "TANH":       ("N*M", 1.34214e-09, 0.00499552,     "logistic1", 56.3172, 553.536, 1.00828, 22.1186),
     "ERF":        ("N*M", 1.34214e-09, 0.00499552,     "logistic1", 63.2964, 550.586, 1.2725,  27.6518),
     # ---- 计算密集型 ---- use input K
-    "GEMM":       ("N*M*K", 3.3886e-12, 0.011349,       "logistic1", 72.6671, 550.332, 0.499277, 14.0645),
+    "GEMM":       ("N*M*K", 3.09522e-12, 0.058869,      "logistic1", 72.6671, 550.332, 0.499277, 14.0645),
     "LINEAR":     ("N*M*K", 3.53285e-12, 0.0103349,    "logistic1", 93.7326, 519.756, 1.58347, 47.3039),
-    "BMM":        ("N*M*K", 3.3886e-12, 0.011349,       "logistic1", 72.6671, 550.332, 0.499277, 14.0645),
+    "BMM":        ("N*M*K", 3.23329e-12, 0.00923393,   "logistic1", 94.2941, 516.929, 1.7072,  50.5924),
     # ---- 不对称（N,M 分别作用） ----
     "SOFTMAX":    ("N,M", 1.72302e-06, 2.91939e-06, 2.58744e-11, 0.00384187,  "logistic2", 48.1421, 570.69,  0.755547, 0.442078, 13.0659),
     "REDUCEMEAN": ("N,M", 7.34328e-07, 6.47576e-07, 2.49611e-11, 0.0116988,   "logistic2", 61.9219, 467.778, 0.672083, 0.972062, 20.038),
@@ -172,12 +172,29 @@ def _match_chain(node, expected, idx, skip):
         cur = found
     return chain
 
-def estimate_with_fusion(nodes, stage=None):
+def estimate_with_fusion(nodes, stage=None, summary=None):
     from energy_consumption_refactor import extract_mnk_ins as _emi
     from collections import defaultdict
     idx = _build_idx(nodes)
     skip = {}
     rule_counts = {"view": 0, "gemm_act": 0, "ln": 0, "rms": 0, "attn": 0, "swiglu": 0, "gemm_stack": 0}
+    
+    # Model architecture for framework overhead correction
+    _hidden_dim = 0
+    _num_layers = 0
+    if summary:
+        _num_layers = summary.get("num_layers", 0)
+        # hidden_dim: most common K among GEMMs where K == N
+        from collections import Counter
+        _ks = Counter()
+        for n in nodes:
+            if n.get("op_type") in ("GEMM", "LINEAR", "BMM"):
+                ins = n.get("input_tensors", [])
+                if len(ins) >= 2:
+                    s = ins[1].get("shape", [])
+                    if len(s) >= 2:
+                        _ks[s[0]] += 1
+        _hidden_dim = max(_ks, key=_ks.get) if _ks else 0
     # Rule 1: view ops
     for n in nodes:
         if n.get("op_type") in {"RESHAPE","VIEW","SLICE","EXPAND"}:
@@ -288,6 +305,17 @@ def estimate_with_fusion(nodes, stage=None):
         e *= fuse_discount
         result[ONNX_CAT.get(n.get("op_type", "UNKNOWN"), "memory_bound")] += e
         total += e
+    
+    # Framework overhead correction (EMNLP 2023: The Framework Tax)
+    if _hidden_dim > 0 and _num_layers > 0:
+        _stage_nodes = [n for n in nodes if (stage and n.get("stage") == stage) or not stage]
+        _num_ops = len(_stage_nodes)
+        _fw_energy = 2.8465e-07 * _hidden_dim * _num_ops + 0.004005 * _num_layers
+        total += _fw_energy
+        result["compute_bound"] = result.get("compute_bound", 0) + _fw_energy * 0.5
+        result["memory_bound"] = result.get("memory_bound", 0) + _fw_energy * 0.3
+        result["data_movement"] = result.get("data_movement", 0) + _fw_energy * 0.2
+    
     return dict(result), total, len(skip)
 
 
@@ -431,7 +459,7 @@ def main():
         te = 0.0
         if args.fusion:
             # Use full nodes list for DAG, filter by stage for energy
-            cats, te, n_skip = estimate_with_fusion(nodes, stage=label.lower())
+            cats, te, n_skip = estimate_with_fusion(nodes, stage=label.lower(), summary=summary)
             for n in sn:
                 op = n["op_type"]
                 op_count[op] += 1
