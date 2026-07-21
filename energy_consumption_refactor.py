@@ -346,21 +346,33 @@ def energy_j(N, M, K, formula_key):
     return t_ms * p / 1000  # mJ → J
 
 
+def _is_transpose_view(node):
+    """判断 TRANSPOSE 是 view 还是 copy：通过数据量和 CSV 实测数据的对应关系"""
+    ins = node.get("input_tensors", [])
+    if not ins:
+        return True
+    shape = ins[0].get("shape", [])
+    vol = 1
+    for d in shape:
+        if d > 0:
+            vol *= d
+    # CSV 中 128×16=2048 以下都是 view（t≈0.0026ms，iter>3M）
+    # 1024×151936=155M 才是 copy（t≈1.16ms）
+    return vol < 500000  # 小于 50 万元素认为是 view
+
+
 def estimate(node):
     t = node.get("op_type", "UNKNOWN")
     ins = node.get("input_tensors", [])
     outs = node.get("output_tensors", [])
 
-    # CSV 查表优先
-    if _TABLE:
-        iN, iM, iK = extract_mnk_ins(ins, t)
-        oN, oM, oK = extract_mnk_outs(outs)
-        key = (t, iN, iM, iK, oN, oM, oK)
-        if key in _TABLE:
-            return _TABLE[key]
-        key0 = (t, iN, iM, 0, oN, oM, 0)
-        if key0 in _TABLE:
-            return _TABLE[key0]
+    # TRANSPOSE 区分 view 和 copy
+    if t == "TRANSPOSE" and _is_transpose_view(node):
+        f = _FORMULAS.get("TRANSPOSE2RESHAPE")
+        if f and len(f) >= 3 and f[0] == "N*M" and len(f) >= 5 and f[3] == "const":
+            return f[2] * f[4] / 1000  # t * P / 1000 = constant energy
+        return 0.0
+
 
     key = FORMULA_NAME.get(t)
     if key is None or key not in _FORMULAS:
