@@ -156,7 +156,8 @@ def main():
         ok, ec_out = run_cmd(
             [sys.executable, "energy_consumption_refactor.py",
              "-g", str(graph_path),
-             "--gen-len", str(args.gen_len)],
+             "--gen-len", str(args.gen_len),
+             "--fusion"],
             f"{model_name}: energy_consumption_refactor", capture=True)
         pf1 = dc1 = None
         if ok:
