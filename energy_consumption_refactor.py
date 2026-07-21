@@ -146,19 +146,7 @@ for _onnx_op, _fk in FORMULA_NAME.items():
     ONNX_CAT[_onnx_op] = OP_CAT.get(_fk, "memory_bound")
 
 
-def estimate_by_category(nodes, stage=None):
-    from collections import defaultdict
-    result = defaultdict(float)
-    for n in nodes:
-        if stage and n.get("stage") != stage:
-            continue
-        op = n.get("op_type", "UNKNOWN")
-        result[ONNX_CAT.get(op, "memory_bound")] += estimate(n)
-    return dict(result)
-
-
-# Fusion-aware estimation: operators fused by GPU kernel should not be double-counted
-_VIEW_OPS = {"RESHAPE", "VIEW", "SLICE", "EXPAND"}
+_VIEW_OPS = {"RESHAPE", "VIEW", "SLICE", "EXPAND", "TRANSPOSE"}
 _FUSABLE_ACT = {"ADD", "MUL", "GELU", "SILU", "RELU", "SIGMOID", "TANH", "NEG", "SUB"}
 
 def _build_idx(nodes):
@@ -184,18 +172,21 @@ def _match_chain(node, expected, idx, skip):
     return chain
 
 def estimate_with_fusion(nodes, stage=None):
+    from energy_consumption_refactor import extract_mnk_ins as _emi
     from collections import defaultdict
     idx = _build_idx(nodes)
     skip = set()
-
-    LN_CHAIN = ["SUB", "POW", "SQRT", "DIV", "MUL", "ADD"]
-    RMS_CHAIN = ["REDUCEMEAN", "ADD", "SQRT", "DIV", "MUL"]
-    ATTN_MID = ["SOFTMAX", "ISNAN", "WHERE"]
-
+    rule_counts = {"view": 0, "gemm_act": 0, "ln": 0, "rms": 0, "attn": 0, "swiglu": 0, "gemm_stack": 0}
     # Rule 1: view ops
     for n in nodes:
-        if n.get("op_type") in _VIEW_OPS:
+        if n.get("op_type") in {"RESHAPE","VIEW","SLICE","EXPAND"}:
             skip.add(n.get("op_id", ""))
+            rule_counts["view"] += 1
+
+
+    LN_CHAIN = ["SUB", "POW", "SQRT", "DIV", "MUL", "ADD"]
+    RMS_CHAIN = ["REDUCEMEAN", "ADD", "SQRT", "RECIPROCAL", "MUL", "CAST", "MUL"]
+    ATTN_MID = ["SOFTMAX", "ISNAN", "WHERE"]
 
     # Rule 2: GEMM -> elementwise fusion
     for n in nodes:
@@ -216,14 +207,16 @@ def estimate_with_fusion(nodes, stage=None):
             if chain and len(chain) == 7:
                 for cn in chain[1:]:
                     skip.add(cn.get("op_id", ""))
+                    rule_counts["ln"] += 1
 
     # Rule 4: RMSNorm chain
     for n in nodes:
         if n.get("op_type") == "POW" and n.get("op_id", "") not in skip:
             chain = _match_chain(n, RMS_CHAIN, idx, skip)
-            if chain and len(chain) == 6:
+            if chain and len(chain) == 8:
                 for cn in chain[1:]:
                     skip.add(cn.get("op_id", ""))
+                    rule_counts["rms"] += 1
 
     # Rule 5: Attention chain
     for n in nodes:
@@ -254,6 +247,26 @@ def estimate_with_fusion(nodes, stage=None):
                     skip.add(n.get("op_id", ""))
                     skip.add(cid)
 
+        # Rule 7: GEMM stacking
+    gemm_groups = defaultdict(list)
+    import energy_consumption_refactor as _ecr
+    for n in nodes:
+        if n.get("op_type") == "GEMM":
+            pset = tuple(sorted(n.get("parents", [])))
+            ins = n.get("input_tensors", [])
+            m = _emi(ins, 'GEMM')[1]
+            k = _emi(ins, 'GEMM')[2]
+            gemm_groups[(pset, m, k)].append(n)
+
+    for (pset, m, k), gg in gemm_groups.items():
+        if len(gg) <= 1:
+            continue
+        total_n = sum(_emi(g.get("input_tensors",[]), 'GEMM')[0] for g in gg)
+        for g in gg[:-1]:
+            skip.add(g.get("op_id", ""))
+            rule_counts["gemm_stack"] += 1
+        gg[-1]["_fused_gemm_n"] = total_n
+
     result = defaultdict(float)
     total = 0.0
     for n in nodes:
@@ -261,7 +274,29 @@ def estimate_with_fusion(nodes, stage=None):
             continue
         if n.get("op_id", "") in skip:
             continue
-        e = estimate(n)
+        nid = n.get("op_id", "")
+        fused_n = n.get("_fused_gemm_n", 0)
+        if fused_n:
+            ins = n.get("input_tensors", [])
+            t = n.get("op_type", "UNKNOWN")
+            if t == "GEMM" and len(ins) >= 2:
+                # Modify B's last dim for CSV lookup: [K, fused_n] instead of [K, N]
+                b_shape = list(ins[1]["shape"])
+                if len(b_shape) >= 2:
+                    b_shape[-1] = fused_n
+                syn_key = (t, ins[0]["shape"], b_shape, [t["shape"] for t in n.get("output_tensors",[])])
+                # Directly look up CSV: use extract_mnk style
+                from energy_consumption_refactor import extract_mnk_ins, extract_mnk_outs
+                iN2, iM2, iK2 = fused_n, 0, 0
+                # Actually just patch the input tensors and call estimate
+                import copy
+                syn = copy.deepcopy(n)
+                syn["input_tensors"][1]["shape"] = b_shape
+                e = estimate(syn)
+            else:
+                e = estimate(n)
+        else:
+            e = estimate(n)
         result[ONNX_CAT.get(n.get("op_type", "UNKNOWN"), "memory_bound")] += e
         total += e
     return dict(result), total, len(skip)
@@ -379,15 +414,18 @@ def main():
     import energy_consumption_refactor as _ecr_mod
     _ecr_mod._TABLE = _TABLE
 
-    def stage_report(sn):
+    def stage_report(sn, label):
         op_energy = defaultdict(float)
         op_count = defaultdict(int)
         te = 0.0
         if args.fusion:
-            cats, te, _ = estimate_with_fusion(sn)
+            # Use full nodes list for DAG, filter by stage for energy
+            cats, te, n_skip = estimate_with_fusion(nodes, stage=label.lower())
             for n in sn:
                 op = n["op_type"]
                 op_count[op] += 1
+            if args.verbose:
+                print(f"    [fusion] {label}: skipped {n_skip} fused ops, total={te:.4f}J")
         else:
             for n in sn:
                 op = n["op_type"]
@@ -400,7 +438,7 @@ def main():
     stages = []
     for label, sn in [("Prefill", pf_nodes), ("Decode", dc_nodes)]:
         if sn:
-            stages.append((label, *stage_report(sn)))
+            stages.append((label, *stage_report(sn, label)))
 
     lines = [
         "=" * 70, "  Energy Consumption Reconstruction", "=" * 70,
