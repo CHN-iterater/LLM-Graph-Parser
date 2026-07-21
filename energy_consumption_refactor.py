@@ -414,12 +414,18 @@ def main():
         op_energy = defaultdict(float)
         op_count = defaultdict(int)
         te = 0.0
-        for n in sn:
-            op = n["op_type"]
-            e = estimate(n)
-            op_energy[op] += e
-            op_count[op] += 1
-            te += e
+        if args.fusion:
+            cats, te, _ = estimate_with_fusion(sn)
+            for n in sn:
+                op = n["op_type"]
+                op_count[op] += 1
+        else:
+            for n in sn:
+                op = n["op_type"]
+                e = estimate(n)
+                op_energy[op] += e
+                op_count[op] += 1
+                te += e
         return op_energy, op_count, te
 
     stages = []
