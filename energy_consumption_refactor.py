@@ -148,7 +148,7 @@ for _onnx_op, _fk in FORMULA_NAME.items():
 
 
 _VIEW_OPS = {"RESHAPE", "VIEW", "SLICE", "EXPAND", "TRANSPOSE"}
-_FUSABLE_ACT = {"ADD", "MUL", "GELU", "SILU", "RELU", "SIGMOID", "TANH", "NEG", "SUB"}
+_FUSABLE_ACT = {"ADD", "GELU", "RELU"}
 
 def _build_idx(nodes):
     idx = {}
@@ -235,18 +235,6 @@ def estimate_with_fusion(nodes, stage=None):
                         skip.add(cn.get("op_id", ""))
                     break
 
-    # Rule 6: SwiGLU activation
-    for n in nodes:
-        if n.get("op_type") != "SILU":
-            continue
-        sp = set(n.get("parents", []))
-        for cid in n.get("children", []):
-            c = idx.get(cid)
-            if c and c.get("op_type") == "MUL":
-                mp = set(c.get("parents", []))
-                if sp & mp:
-                    skip.add(n.get("op_id", ""))
-                    skip.add(cid)
 
         # Rule 7: GEMM stacking
     gemm_groups = defaultdict(list)
@@ -373,6 +361,16 @@ def estimate(node):
             return f[2] * f[4] / 1000  # t * P / 1000 = constant energy
         return 0.0
 
+    # CSV 查表优先
+    if _TABLE:
+        iN, iM, iK = extract_mnk_ins(ins, t)
+        oN, oM, oK = extract_mnk_outs(outs)
+        key = (t, iN, iM, iK, oN, oM, oK)
+        if key in _TABLE:
+            return _TABLE[key]
+        key0 = (t, iN, iM, 0, oN, oM, 0)
+        if key0 in _TABLE:
+            return _TABLE[key0]
 
     key = FORMULA_NAME.get(t)
     if key is None or key not in _FORMULAS:
