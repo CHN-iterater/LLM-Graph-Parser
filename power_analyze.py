@@ -96,20 +96,22 @@ def main():
     runs = max(args.runs, 1)
     gen_len = max(args.gen_len, 1)
 
-    idle_before = idle_after = 0.0
-    if "idle_before_end_energy_j" in ts:
-        e = ts["idle_before_end_energy_j"] - ts["idle_before_start_energy_j"]
-        t = ts["idle_before_end"] - ts["idle_before_start"]
+    idle_cuda = idle_after = 0.0
+    if "idle_cuda_end_energy_j" in ts:
+        e = ts["idle_cuda_end_energy_j"] - ts["idle_cuda_start_energy_j"]
+        t = ts["idle_cuda_end"] - ts["idle_cuda_start"]
         if t > 0.1:
-            idle_before = e / t
+            idle_cuda = e / t
     if "idle_after_end_energy_j" in ts:
         e = ts["idle_after_end_energy_j"] - ts["idle_after_start_energy_j"]
         t = ts["idle_after_end"] - ts["idle_after_start"]
         if t > 0.1:
             idle_after = e / t
 
-    if idle_before > 0:
-        P_bl = idle_before
+    if idle_cuda > 0 and idle_after > 0:
+        P_bl = (idle_cuda + idle_after) / 2
+    elif idle_cuda > 0:
+        P_bl = idle_cuda
     else:
         P_bl = 0.0
 
