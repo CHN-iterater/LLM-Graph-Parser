@@ -145,8 +145,8 @@ def main():
         e_j = e_j_op / runs
 
         _prefix = {"Prefill": "prefill", "Decode": "decode"}[name]
-        _r_c = ts.get(f"{_prefix}_kernel_ratio_compute", 0.0)
-        _r_m = ts.get(f"{_prefix}_kernel_ratio_memory", 0.0)
+        _r_c = ts.get(f"{_prefix}_kernel_ratio_compute_bound", 0.0)
+        _r_m = ts.get(f"{_prefix}_kernel_ratio_memory_bound", 0.0)
         _r_d = ts.get(f"{_prefix}_kernel_ratio_data_movement", 0.0)
         _r_co = ts.get(f"{_prefix}_kernel_ratio_communication", 0.0)
         _r_sum = _r_c + _r_m + _r_d + _r_co
