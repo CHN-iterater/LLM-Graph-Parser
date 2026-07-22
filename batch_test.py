@@ -116,7 +116,7 @@ def main():
             [sys.executable, "power_analyze.py",
              "-t", str(timestamps_path),
              "-n", str(args.runs),
-             "--gen-len", str(args.gen_len)],
+             "--gen-len", str(args.gen_len),],
             f"{model_name}: power_analyze", capture=True)
         pf2 = dc2 = None
         pf2cats = dc2cats = None
@@ -156,7 +156,8 @@ def main():
         ok, ec_out = run_cmd(
             [sys.executable, "energy_consumption_refactor.py",
              "-g", str(graph_path),
-             "--gen-len", str(args.gen_len)],
+             "--gen-len", str(args.gen_len),
+             "--fusion"],
             f"{model_name}: energy_consumption_refactor", capture=True)
         pf1 = dc1 = None
         if ok:
