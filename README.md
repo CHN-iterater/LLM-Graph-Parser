@@ -251,21 +251,33 @@ h100 = HardwareProfile(name="H100-SXM", peak_flops_fp16=1979e12,
 
 ## 能耗重构（可选）
 
-将算子级能耗映射回计算图 DAG，重构推理总能耗并交叉验证方向 1（公式拟合）和方向 2（硬件计数器）。详见 [LLM_Graph_Parser.md](LLM_Graph_Parser.md) 第十章。
+将算子级能耗映射回计算图 DAG，重构推理总能耗并交叉验证。支持两种方法（方向 1: 公式拟合、方向 2: 硬件计数器），内置算子融合折扣与框架开销修正。
+
+详见 [LLM_Graph_Parser.md](LLM_Graph_Parser.md) 第十章。
 
 ### 方向 1: 公式法重构
 
-基于 benchmark 的算子拟合公式估算每算子能耗：
+基于 benchmark 拟合公式 `E(N,M,K) = t(N,M,K) × P(N,M,K)` 估算每算子能耗。支持算子融合感知（`--fusion`），自动应用 cuBLASLt epilogue 融合折扣：
+
+| 融合类型 | 折扣 |
+|---------|------|
+| GEMM + bias (ADD) | 10% |
+| GEMM + GELU | 10% |
+| GEMM + SiLU + Mul (SwiGLU) | 20% |
+| VIEW / RESHAPE / TRANSPOSE | 0%（零开销） |
+| LayerNorm / RMSNorm 前后 | 30% |
+
+并内置框架开销（Framework Tax）修正：`E_corrected = E_raw + 349.96 nJ × hidden_size × num_ops`。
 
 ```bash
 python energy_consumption_refactor.py \
     -g output/ModelName_timestamp/graph.json \
-    --gen-len 20
+    --gen-len 20 --fusion
 ```
 
 ### 方向 2: 硬件计数器测量
 
-nvml 硬件能量计数器直接读取 GPU 总能耗。Prefill/Decode 阶段各重复 PROFILING_RUNS 次取平均，生成阶段逐 token 测量：
+nvml 硬件能量计数器直接读取 GPU 总能耗。Prefill/Decode 阶段各重复 PROFILING_RUNS 次取平均，生成阶段逐 token 测量（每步 GEN_REPEATS 次 forward 降噪）。
 
 ```bash
 python run.py --runs 20 --gen-repeats 50
@@ -280,9 +292,10 @@ python power_analyze.py -t output/ModelName_timestamp/timestamps.txt -n 20
 
 | 脚本 | 用途 | 位置 |
 |------|------|------|
-| `energy_consumption_refactor.py` | 方向 1: 公式法算子能耗重构 | `LLM_Graph_Parser/` |
-| `power_analyze.py` | 方向 2: 硬件计数器分析 | `LLM_Graph_Parser/` |
-| `batch_test.py` | 批量跑多模型对比 | `LLM_Graph_Parser/` |
+| `energy_consumption_refactor.py` | 方向 1: 公式法算子能耗重构（支持 --fusion） | `LLM_Graph_Parser/` |
+| `power_analyze.py` | 方向 2: 硬件计数器分析 + 框架开销校准 | `LLM_Graph_Parser/` |
+| `batch_test.py` | 批量跑多模型对比（同时输出方向 1 + 方向 2） | `LLM_Graph_Parser/` |
+| `profile_kernels.py` | 子进程 GPU kernel profiling（避免 CUDA context 污染） | `LLM_Graph_Parser/` |
 
 ---
 
