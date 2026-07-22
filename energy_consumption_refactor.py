@@ -196,8 +196,8 @@ def estimate_with_fusion(nodes, stage=None, summary=None):
     from collections import defaultdict
     idx = _build_idx(nodes)
     skip = {}
-    rule_counts = {"view": 0, "gemm_act": 0, "ln": 0, "rms": 0, "attn": 0, "swiglu": 0, "gemm_stack": 0, "wtrans": 0}
-
+    rule_counts = {"view": 0, "gemm_act": 0, "ln": 0, "rms": 0, "attn": 0, "swiglu": 0, "gemm_stack": 0}
+    
     # Model architecture for framework overhead correction
     _hidden_dim = 0
     _num_layers = 0
@@ -219,29 +219,6 @@ def estimate_with_fusion(nodes, stage=None, summary=None):
         if n.get("op_type") in {"RESHAPE","VIEW","SLICE","EXPAND"}:
             skip[n.get("op_id", "")] = 0.0
             rule_counts["view"] += 1
-
-    # Rule 1b: weight transpose fusion (TRANSPOSE feeding into GEMM is absorbed by cuBLAS)
-    for n in nodes:
-        if n.get("op_type") != "TRANSPOSE":
-            continue
-        _is_weight_tp = False
-        for cid in n.get("children", []):
-            c = idx.get(cid)
-            if c and c.get("op_type") in {"GEMM", "LINEAR", "BMM"}:
-                # Check if this TRANSPOSE operates on a weight-like tensor (large 2D)
-                _ins = n.get("input_tensors", [])
-                if _ins:
-                    _s = _ins[0].get("shape", [])
-                    if len(_s) >= 2:
-                        from functools import reduce as _rd
-                        import operator as _op
-                        _vol = _rd(_op.mul, [d for d in _s if d > 0], 1)
-                        if _vol > 200000:
-                            _is_weight_tp = True
-                            break
-        if _is_weight_tp:
-            skip[n.get("op_id", "")] = 0.0
-            rule_counts["wtrans"] += 1
 
 
     LN_CHAIN = ["SUB", "POW", "SQRT", "DIV", "MUL", "ADD"]
