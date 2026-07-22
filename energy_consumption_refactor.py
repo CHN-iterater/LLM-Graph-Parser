@@ -220,6 +220,28 @@ def estimate_with_fusion(nodes, stage=None, summary=None):
             skip[n.get("op_id", "")] = 0.0
             rule_counts["view"] += 1
 
+    # Rule 1b: weight transpose fusion (2D weight transpose feeding into GEMM is fused by cuBLAS)
+    for n in nodes:
+        if n.get("op_type") != "TRANSPOSE":
+            continue
+        _ins = n.get("input_tensors", [])
+        if not _ins:
+            continue
+        _s = _ins[0].get("shape", [])
+        if len(_s) != 2:  # only 2D weight tensors, skip 3D/4D activation transposes
+            continue
+        from functools import reduce as _rd
+        import operator as _op
+        _vol = _rd(_op.mul, [d for d in _s if d > 0], 1)
+        if _vol <= 200000:
+            continue
+        for _cid in n.get("children", []):
+            _c = idx.get(_cid)
+            if _c and _c.get("op_type") in {"GEMM", "LINEAR", "BMM"}:
+                skip[n.get("op_id", "")] = 0.0
+                rule_counts.setdefault("wtrans", 0)
+                rule_counts["wtrans"] += 1
+                break
 
     LN_CHAIN = ["SUB", "POW", "SQRT", "DIV", "MUL", "ADD"]
     RMS_CHAIN = ["REDUCEMEAN", "ADD", "SQRT", "RECIPROCAL", "MUL", "CAST", "MUL"]
