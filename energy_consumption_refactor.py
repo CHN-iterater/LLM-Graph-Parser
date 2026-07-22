@@ -518,23 +518,21 @@ def main():
         op_energy = defaultdict(float)
         op_count = defaultdict(int)
         te = 0.0
+        # Always compute per-operator energy
+        for n in sn:
+            op = n["op_type"]
+            e = estimate(n)
+            op_energy[op] += e
+            op_count[op] += 1
+            te += e
+        # If fusion enabled, also compute fusion-aware estimate
+        fusion_info = None
         if args.fusion:
-            # Use full nodes list for DAG, filter by stage for energy
-            cats, te, n_skip = estimate_with_fusion(nodes, stage=label.lower(), summary=summary)
-            for n in sn:
-                op = n["op_type"]
-                op_count[op] += 1
+            cats, fte, n_skip = estimate_with_fusion(nodes, stage=label.lower(), summary=summary)
+            fusion_info = (cats, fte, n_skip)
             if args.verbose:
-                print(f"    [fusion] {label}: skipped {n_skip} fused ops, total={te:.4f}J")
-        else:
-            for n in sn:
-                op = n["op_type"]
-                e = estimate(n)
-                op_energy[op] += e
-                op_count[op] += 1
-                te += e
-        return op_energy, op_count, te
-
+                print(f"    [fusion] {label}: skipped {n_skip} fused ops, raw={te:.4f}J fused={fte:.4f}J")
+        return op_energy, op_count, te, fusion_info
     stages = []
     for label, sn in [("Prefill", pf_nodes), ("Decode", dc_nodes)]:
         if sn:
@@ -548,7 +546,7 @@ def main():
     ]
 
     gt = 0.0
-    for label, op_energy, op_count, total in stages:
+    for label, op_energy, op_count, total, fusion_info in stages:
         mul = args.gen_len if label == "Decode" else 1
         disp = f"{label} (per token)" if mul > 1 else label
         lines += ["", f"  --- {disp} ---",
@@ -560,7 +558,7 @@ def main():
               f"  Aggregated (prefill + decode x{args.gen_len}):",
               f"  Total: {gt:.4f}J ({gt*1000:.2f}mJ)"]
 
-    for label, op_energy, op_count, total in stages:
+    for label, op_energy, op_count, total, fusion_info in stages:
         mul = args.gen_len if label == "Decode" else 1
         disp = f"{label} (per token)" if mul > 1 else label
         lines += ["", f"  {disp} operators:",
@@ -569,7 +567,17 @@ def main():
         for op, e in sorted(op_energy.items(), key=lambda x: -x[1]):
             c = op_count[op]
             lines.append(f"  {op:25s} {c:>5d} {e*1000:>10.4f}  {e/total*100:>5.1f}%")
-
+        # Fusion-aware summary (if enabled)
+        if fusion_info is not None:
+            cats, fte, n_skip = fusion_info
+            lines += ["", f"  {disp} fusion-aware estimate:",
+                      f"  {"Category":20s} {"Energy(J)":>12s} {"%":>8s}",
+                      "  " + "-" * 42]
+            for cat in ("compute_bound", "memory_bound", "data_movement", "communication"):
+                e2 = cats.get(cat, 0)
+                lines.append(f"  {cat:20s} {e2:>10.4f}  {e2/fte*100:>7.1f}%")
+            lines.append(f"  {"Skipped fused":20s} {n_skip:>10d}")
+            lines.append(f"  {"Total (fusion)":20s} {fte:>10.4f}")
     lines += ["", "  Note: Energy estimated from benchmark fitting formulas."]
     text = "\n".join(lines)
     print(text)
