@@ -459,11 +459,10 @@ def run_pytorch_mode():
                 t_before = time.time()
                 for _ in range(GEN_REPEATS):
                     # safety clamp input_ids to prevent OOB embedding crash
-                    _safe_ids = input_ids.clamp(0, model.config.vocab_size - 1)
+                    _safe_ids = input_ids.clamp(0, getattr(model.config, 'vocab_size', getattr(model, 'vocab_size', 50257)) - 1)
                     model_inputs = model.prepare_inputs_for_generation(_safe_ids, **model_kwargs_gen)
                     outputs = model(**model_inputs, return_dict=True)
                     torch.cuda.synchronize()
-                    del outputs
                     del outputs
                 e_after = read_energy_j()
                 dt = time.time() - t_before
