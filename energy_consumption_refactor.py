@@ -351,7 +351,7 @@ def estimate_with_fusion(nodes, stage=None, summary=None):
     if _hidden_dim > 0 and _num_layers > 0:
         _stage_nodes = [n for n in nodes if (stage and n.get("stage") == stage) or not stage]
         _num_ops = len(_stage_nodes)
-        _fw_energy = 3.130e-07 * _hidden_dim * _num_ops
+        _fw_energy = 3.145e-07 * _hidden_dim * _num_ops
         total += _fw_energy
         result["compute_bound"] = result.get("compute_bound", 0) + _fw_energy * 0.5
         result["memory_bound"] = result.get("memory_bound", 0) + _fw_energy * 0.3
