@@ -524,13 +524,13 @@ def main():
 
     gt = 0.0
     for label, op_energy, op_count, total, fusion_info in stages:
+        fused_total = fusion_info[1] if fusion_info else total
         mul = args.gen_len if label == "Decode" else 1
         disp = f"{label} (per token)" if mul > 1 else label
         lines += ["", f"  --- {disp} ---",
                   f"  Nodes: {sum(op_count.values()):>6d}",
-                  f"  Energy:  {total:.4f}J ({total*1000:.2f}mJ)"]
-        gt += total * mul
-
+                  f"  Energy:  {fused_total:.4f}J ({fused_total*1000:.2f}mJ)"]
+        gt += fused_total * mul
     lines += ["", "-" * 70,
               f"  Aggregated (prefill + decode x{args.gen_len}):",
               f"  Total: {gt:.4f}J ({gt*1000:.2f}mJ)"]
