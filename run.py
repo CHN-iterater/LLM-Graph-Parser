@@ -307,7 +307,7 @@ def run_pytorch_mode():
     write_energy("prefill_start", ts_path)
     print(f"  [Phase 1/3] Prefill (profiling, {PROFILING_RUNS} runs)")
     if HARDWARE_PROFILING and profiler.available:
-        pf_kwargs = {}
+        pf_kwargs = {"use_cache": False}
         if attention_mask is not None:
             pf_kwargs["attention_mask"] = attention_mask
         _ = profiler.time_forward(model, prompt_ids, label="prefill", num_runs=PROFILING_RUNS, **pf_kwargs)
@@ -331,7 +331,7 @@ def run_pytorch_mode():
     decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
     if HARDWARE_PROFILING and profiler.available:
         # 准备 decode 时需要的额外参数（attention_mask 等）
-        dc_kwargs = {}
+        dc_kwargs = {"use_cache": False}
         if attention_mask is not None:
             dc_kwargs["attention_mask"] = attention_mask[:, -1:]
         print(f"  [warmup decode] running 2s forward passes...", end=" ", flush=True)
