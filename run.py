@@ -450,7 +450,7 @@ def run_pytorch_mode():
 
         # 逐位置生成 + 测量：每个位置重复 GEN_REPEATS 次 forward（KV cache 不变态）
         input_ids = prompt_ids.clone()
-        model_kwargs_gen = {"use_cache": False}
+        model_kwargs_gen = {"use_cache": True}
         if attention_mask is not None:
             model_kwargs_gen["attention_mask"] = attention_mask.clone()
         token_data = []
@@ -511,37 +511,27 @@ def run_pytorch_mode():
             print(f"  {pos+1:>6d}  {e:>8.4f}  {dt:>6.4f}  {gs:>10s}")
             prev = e
 
-        energy_path = os.path.join(output_dir, "per_token_energy.txt")
-        with open(energy_path, "w") as f:
-            f.write(f"# P_bl={P_bl:.1f}W  total_tokens={gen_len}  forwards_per_step={GEN_REPEATS}\n")
-            f.write(f"# Token  Energy(J)  dt(s)  Growth(%)\n")
+        write_energy("gen_end", ts_path)
+        write_timestamp("gen_end", ts_path)
+
+                                # ---- Per-token energy + operator mapping (merged) ----
+        token_path = os.path.join(output_dir, "per_token.txt")
+        with open(token_path, "w", encoding="utf-8") as f:
+            f.write(f"# P_bl={P_bl:.1f}W  total_tokens={gen_len}  prompt_len={seq_len}  forwards_per_step={GEN_REPEATS}" + chr(10))
+            f.write(f"# Token  Energy(J)  dt(s)  Growth(%)" + chr(10) + chr(10))
             prev = None
             for pos, e, dt in token_data:
                 g = (e / prev - 1) * 100 if prev else None
                 gs = f"{g:+.2f}" if g is not None else "--"
-                f.write(f"{pos+1}  {e:.6f}  {dt:.4f}  {gs}\n")
-                prev = e
-        print(f"    -> saved to {energy_path}")
-
-        write_energy("gen_end", ts_path)
-        write_timestamp("gen_end", ts_path)
-
-        # ---- Per-token operator mapping ----
-        if gen_len > 0 and decode_graph is not None:
-            op_path = os.path.join(output_dir, "per_token_operators.txt")
-            with open(op_path, "w", encoding="utf-8") as f:
-                f.write(f"# Per-token operator mapping  prompt_len={seq_len}  gen_tokens={gen_len}\n")
-                for pos in range(gen_len):
-                    total_e = token_data[pos][1] if pos < len(token_data) else 0.0
-                    f.write(f"\n=== Token {pos+1} (total={total_e:.4f}J) ===\n")
-                    f.write(f"{'Operator':25s}  {'Input Shapes':50s}  {'Output Shapes':50s}\n")
-                    f.write("-" * 130 + "\n")
+                f.write("=" * 70 + chr(10))
+                f.write(f"Token {pos+1}  |  Energy={e:.6f} J  dt={dt:.4f}s  Growth={gs}%" + chr(10))
+                f.write("=" * 70 + chr(10))
+                if decode_graph is not None:
                     for node in decode_graph.nodes:
                         ins = node.input_tensors
                         outs = node.output_tensors
                         in_shapes = [list(t.shape) for t in ins]
                         out_shapes = [list(t.shape) for t in outs]
-                        # Adjust attention sequence dim: seq_len → prompt_len + pos + 1
                         if node.op_type in ("SOFTMAX", "BMM"):
                             for shapes in (in_shapes, out_shapes):
                                 for s in shapes:
@@ -550,8 +540,10 @@ def run_pytorch_mode():
                                             s[i] = seq_len + pos + 1
                         ins_str = "; ".join(str(s) for s in in_shapes)
                         outs_str = "; ".join(str(s) for s in out_shapes)
-                        f.write(f"{node.op_type:25s}  {ins_str:50s}  {outs_str:50s}\n")
-            print(f"    -> saved to {op_path}")
+                        f.write(f"  {node.op_type:25s}  {ins_str:40s}  {outs_str:40s}" + chr(10))
+                f.write(chr(10))
+                prev = e
+        print(f"    -> saved to {token_path}")
 
     # ---- Layer partitioner ----
     for g in (prefill_graph, decode_graph):
@@ -579,21 +571,8 @@ def run_pytorch_mode():
 
     # ---- Save ----
     combined.save_to_json(output_dir, name=prefix)
-    prefill_graph.save_to_json(output_dir, name=f"{prefix}_prefill" if prefix else "prefill")
-    if gen_len > 0:
-        decode_graph.save_to_json(output_dir, name=f"{prefix}_decode" if prefix else "decode")
     stem = f"{prefix}_" if prefix else ""
     Path(output_dir).joinpath(f"{stem}summary.txt").write_text(text, encoding="utf-8")
-    combined.save_phase_report(output_dir, name=prefix, hardware_profile=HARDWARE)
-    combined.save_parallelism_report(output_dir, name=prefix)
-    prefill_graph.save_layer_report(output_dir, name=prefix)
-    if gen_len > 0:
-        decode_graph.save_kv_cache_report(output_dir, name=prefix, num_decode_tokens=gen_len)
-    if HARDWARE_PROFILING and profiler.available:
-        try:
-            profiler.save_report(output_dir, name=prefix)
-        except Exception as pe:
-            print(f"    [profiler] save failed: {pe}")
 
     # ---- 事后空闲基线测量 ----
     write_timestamp("idle_after_start", ts_path)
@@ -649,9 +628,6 @@ def run_onnx_mode():
 
     graph.save_to_json(output_dir)
     Path(output_dir).joinpath("summary.txt").write_text(text, encoding="utf-8")
-    graph.save_phase_report(output_dir, hardware_profile=HARDWARE)
-    graph.save_parallelism_report(output_dir)
-    graph.save_layer_report(output_dir)
     print(f"\n结果目录: {output_dir}/")
 
 
