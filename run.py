@@ -447,7 +447,7 @@ def run_pytorch_mode():
 
         # 逐位置生成 + 测量：每个位置重复 GEN_REPEATS 次 forward（KV cache 不变态）
         input_ids = prompt_ids.clone()
-        model_kwargs_gen = {"use_cache": True}
+        model_kwargs_gen = {"use_cache": False}
         if attention_mask is not None:
             model_kwargs_gen["attention_mask"] = attention_mask.clone()
         token_data = []
