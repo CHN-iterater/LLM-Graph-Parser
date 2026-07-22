@@ -571,7 +571,7 @@ def main():
         if fusion_info is not None:
             cats, fte, n_skip = fusion_info
             lines += ["", f"  {disp} fusion-aware estimate:",
-                      f"  {"Category":20s} {"Energy(J)":>12s} {"%":>8s}",
+                      f"  {'Category':20s} {'Energy(J)':>12s} {'%':>8s}",
                       "  " + "-" * 42]
             for cat in ("compute_bound", "memory_bound", "data_movement", "communication"):
                 e2 = cats.get(cat, 0)
