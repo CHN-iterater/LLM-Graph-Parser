@@ -5,7 +5,6 @@ from pathlib import Path
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ["PYTORCH_NO_CUDA_MEMORY_CACHING"] = "1"
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from llm_graph_parser import parse_model, parse_onnx
 from llm_graph_parser.hardware import HardwareProfiler
@@ -459,9 +458,12 @@ def run_pytorch_mode():
                 e_before = read_energy_j()
                 t_before = time.time()
                 for _ in range(GEN_REPEATS):
-                    model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
+                    # safety clamp input_ids to prevent OOB embedding crash
+                    _safe_ids = input_ids.clamp(0, model.config.vocab_size - 1)
+                    model_inputs = model.prepare_inputs_for_generation(_safe_ids, **model_kwargs_gen)
                     outputs = model(**model_inputs, return_dict=True)
                     torch.cuda.synchronize()
+                    del outputs
                     del outputs
                 e_after = read_energy_j()
                 dt = time.time() - t_before
