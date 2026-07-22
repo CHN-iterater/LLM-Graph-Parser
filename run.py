@@ -245,10 +245,8 @@ def run_pytorch_mode():
         print(f"  [config] resized embeddings to {len(tokenizer)}")
     print(f"  参数总量: {sum(p.numel() for p in model.parameters()):,}")
 
-    # 关闭 KV cache，保证每次 forward 都是完整前向（与方向 1 对齐）
-    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
-        model.config.use_cache = False
-        print("  [config] use_cache=False")
+    # 注意: 生成循环需要 KV cache（use_cache=True）进行逐 token 能耗测量，
+    # ONNX 导出阶段由 parse_model 自行处理 use_cache 参数
 
     # ---- 硬件 profiling 初始化 ----
     profiler = HardwareProfiler()
