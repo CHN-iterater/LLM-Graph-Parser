@@ -576,8 +576,8 @@ def main():
             for cat in ("compute_bound", "memory_bound", "data_movement", "communication"):
                 e2 = cats.get(cat, 0)
                 lines.append(f"  {cat:20s} {e2:>10.4f}  {e2/fte*100:>7.1f}%")
-            lines.append(f"  {"Skipped fused":20s} {n_skip:>10d}")
-            lines.append(f"  {"Total (fusion)":20s} {fte:>10.4f}")
+            lines.append(f"  {'Skipped fused':20s} {n_skip:>10d}")
+            lines.append(f"  {'Total (fusion)':20s} {fte:>10.4f}")
     lines += ["", "  Note: Energy estimated from benchmark fitting formulas."]
     text = "\n".join(lines)
     print(text)
