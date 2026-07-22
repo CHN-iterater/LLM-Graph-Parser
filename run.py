@@ -244,8 +244,10 @@ def run_pytorch_mode():
         print(f"  [config] resized embeddings to {len(tokenizer)}")
     print(f"  参数总量: {sum(p.numel() for p in model.parameters()):,}")
 
-    # 注意: 生成循环需要 KV cache（use_cache=True）进行逐 token 能耗测量，
-    # ONNX 导出阶段由 parse_model 自行处理 use_cache 参数
+    # 全局关闭 KV cache，保证所有 forward 是完整前向
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+        print("  [config] use_cache=False")
 
     # ---- 硬件 profiling 初始化 ----
     profiler = HardwareProfiler()
@@ -307,7 +309,7 @@ def run_pytorch_mode():
     write_energy("prefill_start", ts_path)
     print(f"  [Phase 1/3] Prefill (profiling, {PROFILING_RUNS} runs)")
     if HARDWARE_PROFILING and profiler.available:
-        pf_kwargs = {"use_cache": False}
+        pf_kwargs = {}
         if attention_mask is not None:
             pf_kwargs["attention_mask"] = attention_mask
         _ = profiler.time_forward(model, prompt_ids, label="prefill", num_runs=PROFILING_RUNS, **pf_kwargs)
@@ -331,7 +333,7 @@ def run_pytorch_mode():
     decode_token = decode_token.to(device) if HARDWARE_PROFILING and profiler.available else decode_token
     if HARDWARE_PROFILING and profiler.available:
         # 准备 decode 时需要的额外参数（attention_mask 等）
-        dc_kwargs = {"use_cache": False}
+        dc_kwargs = {}
         if attention_mask is not None:
             dc_kwargs["attention_mask"] = attention_mask[:, -1:]
         print(f"  [warmup decode] running 2s forward passes...", end=" ", flush=True)
