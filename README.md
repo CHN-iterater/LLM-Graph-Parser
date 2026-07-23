@@ -267,7 +267,7 @@ h100 = HardwareProfile(name="H100-SXM", peak_flops_fp16=1979e12,
 | VIEW / RESHAPE / TRANSPOSE | 0%（零开销） |
 | LayerNorm / RMSNorm 前后 | 30% |
 
-并内置框架开销（Framework Tax）修正：`E_corrected = E_raw + 314.5 nJ × hidden_size × num_ops`（R²=0.97，拟合自 8 个模型）。
+并内置框架开销（Framework Tax）修正：`E_corrected = E_raw + 296.7 nJ × hidden_size × num_ops`（R²=0.99，拟合自 Core 5 模型）。
 
 ```bash
 python energy_consumption_refactor.py \
