@@ -21,7 +21,7 @@ DEFAULT_MODELS = sorted(
 
 MAX_NEW_TOKENS = 20
 PROMPT = "What's the capital of France?"
-PROFILING_RUNS = 20
+PROFILING_RUNS = 100
 GEN_LEN = 20
 
 
