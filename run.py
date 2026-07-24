@@ -276,6 +276,7 @@ def run_pytorch_mode():
     prompt = PROMPT
     inputs = tokenizer(prompt, return_tensors="pt")
     prompt_ids = inputs["input_ids"]
+    prompt_ids = torch.clamp(prompt_ids, 0, model.config.vocab_size - 1)
     attention_mask = inputs.get("attention_mask")
     if HARDWARE_PROFILING and profiler.available:
         prompt_ids = prompt_ids.to(device)
