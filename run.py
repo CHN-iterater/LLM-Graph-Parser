@@ -479,7 +479,6 @@ def run_pytorch_mode():
                     outputs, model_kwargs_gen,
                     is_encoder_decoder=model.config.is_encoder_decoder,
                 )
-                model_kwargs_gen.pop("past_key_values", None)  # use_cache=False
                 logits = outputs.logits[:, -1, :].float()
                 scores = logits_processor(input_ids, logits)
                 next_token = torch.argmax(scores, dim=-1, keepdim=True)
