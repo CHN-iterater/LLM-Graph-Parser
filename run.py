@@ -70,6 +70,16 @@ def write_energy(label: str, path: str):
     if e is not None:
         with open(path, "a") as f:
             f.write(f"{label}_energy_j {e:.4f}\n")
+def _vocab_size(model):
+    """Get the actual embedding vocabulary size."""
+    try:
+        emb = model.get_input_embeddings()
+        if hasattr(emb, "weight"):
+            return emb.weight.shape[0]
+    except Exception:
+        pass
+    return getattr(model.config, "vocab_size", getattr(model, "vocab_size", 50257))
+
 
 
 
@@ -276,7 +286,7 @@ def run_pytorch_mode():
     prompt = PROMPT
     inputs = tokenizer(prompt, return_tensors="pt")
     prompt_ids = inputs["input_ids"]
-    prompt_ids = torch.clamp(prompt_ids, 0, model.config.vocab_size - 1)
+    prompt_ids = torch.clamp(prompt_ids, 0, _vocab_size(model) - 1)
     attention_mask = inputs.get("attention_mask")
     if HARDWARE_PROFILING and profiler.available:
         prompt_ids = prompt_ids.to(device)
