@@ -455,47 +455,67 @@ def run_pytorch_mode():
         token_data = []
         generated_ids = []
 
+        # 某些模型（如 OPT）的 prepare_inputs_for_generation 不兼容手动循环
+        # 捕捉异常后退回到 model.generate()
+        _manual_gen_failed = False
         with torch.no_grad():
             for step in range(MAX_NEW_TOKENS):
-                e_before = read_energy_j()
-                t_before = time.time()
-                for _ in range(GEN_REPEATS):
-                    # safety clamp input_ids to prevent OOB embedding crash
-                    _safe_ids = input_ids.clamp(0, getattr(model.config, 'vocab_size', getattr(model, 'vocab_size', 50257)) - 1)
-                    model_inputs = model.prepare_inputs_for_generation(_safe_ids, **model_kwargs_gen)
+                try:
+                    e_before = read_energy_j()
+                    t_before = time.time()
+                    for _ in range(GEN_REPEATS):
+                        _safe_ids = input_ids.clamp(0, getattr(model.config, 'vocab_size', getattr(model, 'vocab_size', 50257)) - 1)
+                        model_inputs = model.prepare_inputs_for_generation(_safe_ids, **model_kwargs_gen)
+                        outputs = model(**model_inputs, return_dict=True)
+                        torch.cuda.synchronize()
+                        del outputs
+                    e_after = read_energy_j()
+                    dt = time.time() - t_before
+
+                    raw_per_forward = (e_after - e_before) - P_bl * dt
+                    e_step = max(raw_per_forward / GEN_REPEATS, 0.0)
+
+                    model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
                     outputs = model(**model_inputs, return_dict=True)
-                    torch.cuda.synchronize()
+                    model_kwargs_gen = model._update_model_kwargs_for_generation(
+                        outputs, model_kwargs_gen,
+                        is_encoder_decoder=model.config.is_encoder_decoder,
+                    )
+                    logits = outputs.logits[:, -1, :].float()
+                    scores = logits_processor(input_ids, logits)
+                    next_token = torch.argmax(scores, dim=-1, keepdim=True)
+                    vocab_size = getattr(model.config, "vocab_size", scores.shape[-1])
+                    next_token = torch.clamp(next_token, 0, vocab_size - 1)
+                    input_ids = torch.cat([input_ids, next_token], dim=-1)
+
+                    generated_ids.append(next_token[0, 0].item())
+                    token_data.append((step, e_step, dt / GEN_REPEATS))
+
+                    if stopping_criteria(input_ids, None):
+                        break
                     del outputs
-                e_after = read_energy_j()
-                dt = time.time() - t_before
-
-                raw_per_forward = (e_after - e_before) - P_bl * dt
-                e_step = max(raw_per_forward / GEN_REPEATS, 0.0)
-
-                # 真正一次 forward 更新状态 + 选 token
-                model_inputs = model.prepare_inputs_for_generation(input_ids, **model_kwargs_gen)
-                outputs = model(**model_inputs, return_dict=True)
-                model_kwargs_gen = model._update_model_kwargs_for_generation(
-                    outputs, model_kwargs_gen,
-                    is_encoder_decoder=model.config.is_encoder_decoder,
-                )
-                logits = outputs.logits[:, -1, :].float()
-                scores = logits_processor(input_ids, logits)
-                next_token = torch.argmax(scores, dim=-1, keepdim=True)
-                vocab_size = getattr(model.config, "vocab_size", scores.shape[-1])
-                next_token = torch.clamp(next_token, 0, vocab_size - 1)
-                input_ids = torch.cat([input_ids, next_token], dim=-1)
-
-                generated_ids.append(next_token[0, 0].item())
-                token_data.append((step, e_step, dt / GEN_REPEATS))
-
-                if stopping_criteria(input_ids, None):
+                except Exception:
+                    _manual_gen_failed = True
                     break
-                del outputs
 
-        gen_len = len(generated_ids)
-
-        answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+        if _manual_gen_failed:
+            print(f"    [gen] manual loop failed, falling back to model.generate()")
+            generated_ids = []
+            token_data = []
+            with torch.no_grad():
+                kw = dict(max_new_tokens=MAX_NEW_TOKENS, pad_token_id=tokenizer.pad_token_id)
+                if attention_mask is not None:
+                    kw["attention_mask"] = attention_mask
+                for k, v in model.generation_config.to_dict().items():
+                    if v is not None and k not in kw and k not in ("_from_model_config", "transformers_version"):
+                        kw[k] = v
+                out = model.generate(prompt_ids, **kw)
+            gen_len = out.shape[1] - seq_len
+            generated_ids = out[0, seq_len:].tolist()
+            answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+        else:
+            gen_len = len(generated_ids)
+            answer = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
         print(f"    generated: {gen_len} tokens")
         print(f"    answer: \"{answer[:100]}{'...' if len(answer) > 100 else ''}\"")
         if gen_len == 0:
